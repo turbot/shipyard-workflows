@@ -1,0 +1,113 @@
+# Tags a release once it has shipped: an annotated tag at the release PR's merge commit, made as
+# the area's release App, and the floating major tag (`v1`) moved when the repo has one.
+# docs/release-tag.md says which signals a repo wires up.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
+# commit. A caller runs it from one of two triggers:
+#
+#   a push to main or main-*   after the repo's ship job (`needs: ship`, `ship-result: ${{ needs.ship.result }}`),
+#                              or on its own for a Go library (`signal: merge`: the tag is the publish)
+#   an issue_comment           `/shipped` on a merged release PR, from a person with write access
+#
+# Nothing here checks out the caller's repo or runs its code: GitHub is asked for the PR, the tags
+# and the commit, and the PR's text is data. The job's own token only reads; the release App's token
+# (`release-token`) is in the environment of the last step alone, and it is what makes the tag.
+
+name: Tag
+
+on:
+  workflow_call:
+    inputs:
+      signal:
+        description: 'ship-job: the repo''s ship job ran first (pass its result as ship-result). merge: a Go library, where the tag is the publish.'
+        type: string
+        default: ship-job
+      ship-result:
+        description: With the ship-job signal on a push, the ship job's own result (needs.<job>.result). Anything but success tags nothing.
+        type: string
+        default: ''
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        default: v
+      automation-logins:
+        description: 'The accounts that open release PRs, comma-separated. Required: a merged release/ PR from any other account is never tagged.'
+        type: string
+        required: true
+      floating-major:
+        description: Move the repo's floating major tag (v0, v1) to each release that is the newest of its major.
+        type: boolean
+        default: false
+    secrets:
+      release-token:
+        description: A token of the area's release App that can write the repo's tags (contents write).
+        required: true
+
+permissions: {}
+
+jobs:
+  tag:
+    name: tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read        # the tags and the merge commit
+      pull-requests: read   # the release PR, and the commits a PR was merged as
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      - name: Find this workflow's commit
+        # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+        # workflow, which is the commit of shipyard to run.
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/tag.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows tag.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Tag::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # Inputs reach the command as environment, never as shell text.
+      - name: Tag the release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ secrets.release-token }}
+          SIGNAL: ${{ inputs.signal }}
+          SHIP_RESULT: ${{ inputs.ship-result }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          FLOATING_MAJOR: ${{ inputs.floating-major }}
+        run: |
+          # Never empty: with no one named, a release/ PR from any account that merged could be tagged.
+          if [ -z "${AUTOMATION_LOGINS//[[:space:],]/}" ]; then echo "::error::automation-logins names no account: name the accounts that open release PRs"; exit 1; fi
+          args=(--signal "$SIGNAL" --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS")
+          [ -n "$SHIP_RESULT" ] && args+=(--ship-result "$SHIP_RESULT")
+          [ "$FLOATING_MAJOR" = "true" ] && args+=(--floating-major)
+          node shipyard/bin/shipyard tag "${args[@]}"

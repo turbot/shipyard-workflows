@@ -13,6 +13,7 @@ const STEPS = {
   'release-check': () => require('../lib/release-check-command'),
   push: () => require('../lib/push-command'),
   record: () => require('../lib/record-command'),
+  tag: () => require('../lib/tag-command'),
   start: () => require('../lib/start-command'),
   'start-watch': () => require('../lib/start-watch-command'),
   'private-data': () => require('../lib/private-data-command'),
