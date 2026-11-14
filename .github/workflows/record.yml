@@ -15,7 +15,8 @@
 # (`shipyard record`); push the evidence commit with the caller's token (`shipyard push`); wait
 # for GitHub to show the pushed commit as the PR's head; run the caller's required-check workflows
 # on it; wait for the other checks; write the body (`shipyard record --update`).
-# A push made with the job's own token starts no workflow, so this does not call itself, and the
+# A push made with the job's own token starts no workflow that runs (GitHub holds its `pull_request`
+# runs for a person's approval), so this does not call itself, and the
 # checks the base branch's rules require would never run on the evidence commit. A
 # `workflow_dispatch` made with that token does start a run, so the job starts each workflow the
 # caller lists in `required-check-workflows` on the release branch, now at the pushed commit.
@@ -228,12 +229,13 @@ jobs:
           echo "::error title=Record::#$PR still shows ${have:0:7}, not the pushed ${want:0:7}, after two minutes"
           exit 2
 
-      # The pushed commit got no checks: a push made with the job's own token starts no workflow.
+      # The pushed commit got no checks: a push made with the job's own token starts no
+      # workflow that runs (its `pull_request` runs are held for approval and make no check).
       # A `workflow_dispatch` made with it does, so each listed workflow is run on the release
       # branch, which is now at the pushed commit, and the checks it makes land on the PR's head.
       # Every listed workflow must exist and be enabled before any is started, so a wrong name
       # starts none. One that already ran on this commit is not run again, so a run that comes
-      # again starts nothing new. Then wait, bounded (two minutes), for GitHub to show each run on
+      # again starts nothing new; a run held for approval, cancelled or skipped did not run. Then wait, bounded (two minutes), for GitHub to show each run on
       # the commit, so the wait for the other checks below can see their checks.
       - name: Run the required checks on the pushed commit
         shell: bash
@@ -252,11 +254,20 @@ jobs:
             exit 0
           fi
           head=$(git -C caller rev-parse HEAD)
-          # Sets `runs` to the number of runs of workflow $1 on the head; any doubt fails the job.
+          # Sets `runs` to the number of runs of workflow $1 on the head that ran, and `held` to
+          # the number that did not; any doubt fails the job. A run held for approval
+          # (`action_required`), cancelled or skipped made no check, so it is not a run: GitHub
+          # holds the `pull_request` runs of a push made with the job's own token, and counting
+          # one as "already run" would start nothing and leave the required check missing.
           count_runs() {
-            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$1/runs?head_sha=$head&per_page=1" --jq .total_count) \
+            local seen total
+            seen=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$1/runs?head_sha=$head&per_page=100" \
+              --jq '[.total_count, ([.workflow_runs[] | select(.conclusion as $c | ["action_required", "cancelled", "skipped"] | index($c) | not)] | length)] | @tsv') \
               || fail "could not read the runs of the required-check workflow $1"
-            [[ "$runs" =~ ^[0-9]+$ ]] || fail "GitHub did not say how many runs the required-check workflow $1 has"
+            IFS=$'\t' read -r total runs <<< "$seen"
+            [[ "$total" =~ ^[0-9]+$ && "$runs" =~ ^[0-9]+$ ]] || fail "GitHub did not say how many runs the required-check workflow $1 has"
+            (( total <= 100 )) || fail "the required-check workflow $1 has more than 100 runs on the head, too many to tell which ran"
+            held=$((total - runs))
           }
           for w in "${workflows[@]}"; do
             state=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$w" --jq .state) \
@@ -269,6 +280,9 @@ jobs:
             if (( runs > 0 )); then
               echo "$w has already run on ${head:0:7}: not run again."
               continue
+            fi
+            if (( held > 0 )); then
+              echo "$w has $held held, cancelled or skipped run(s) on ${head:0:7} and none that ran: running it."
             fi
             gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/$w/dispatches" -f ref="$BRANCH" > /dev/null \
               || fail "the required-check workflow $w could not be run on $BRANCH: it must accept workflow_dispatch"

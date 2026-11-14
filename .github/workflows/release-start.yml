@@ -65,6 +65,9 @@ jobs:
     timeout-minutes: 200  # a release:now start may wait up to 180 minutes for its full check
     permissions:
       contents: read   # check out the family files, and the product repo with the workflow's own token
+      pull-requests: read  # list the open pull requests and read a release:now one, with the workflow's own token on a private product repo
+      checks: read     # read the full check (develop-green) on a release:now merge commit: its check runs
+      statuses: read   # ... and its commit statuses, which the same read also lists
       issues: write    # file the prep job, and ask the approvers, in the calling repo
       id-token: write  # learn which commit of this workflow is running (job_workflow_sha)
     steps:

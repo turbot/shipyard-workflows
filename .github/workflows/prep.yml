@@ -1,0 +1,72 @@
+# Hands a prep file to the cut: takes the file the prep run wrote and uploads it as this run's
+# artifact `prep`, the artifact `cut.yml` reads from the run named by its `prep-run` input. So the
+# prep file reaches the cut with no commit to the working branch.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
+# commit. See the README for the caller.
+#
+# It runs in the product repo, the repo the cut runs in: the cut takes only a run of its own repo.
+# It checks only that the file is a JSON object, and runs none of the repo's code or Shipyard's.
+# Nothing about the file is trusted because it came from here: the cut makes the facts itself and
+# lints the file against them before it cuts or pushes anything.
+#
+# The file's content reaches the step as an environment variable, never in a shell line. Actions
+# lists the job's environment, the content included, at the top of each step's log: the file holds
+# the release notes and report, which the release PR shows anyway.
+
+name: Hand a prep file to the cut
+
+on:
+  workflow_call:
+    inputs:
+      prep:
+        description: The prep file's content, the JSON the prep run wrote (prep.json), not a path. A run can take up to 65,535 characters of inputs.
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  prep:
+    name: prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}       # the upload uses the run's own artifact token, not GITHUB_TOKEN
+    env:
+      PREP: ${{ inputs.prep }}
+    steps:
+      - name: Check the prep file
+        shell: bash
+        run: |
+          node - <<'JS'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          // An error names what is wrong and never quotes the file.
+          const fail = (message) => {
+            console.log(`::error title=Prep::${message}`);
+            process.exit(2);
+          };
+          const text = process.env.PREP || '';
+          if (!text.trim()) fail('prep is empty: give the content of the prep file (prep.json), not a path');
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            fail('prep is not JSON: give the content of the prep file (prep.json) as the prep run wrote it');
+          }
+          if (!data || typeof data !== 'object' || Array.isArray(data)) fail('prep must be a JSON object, the prep file the prep run wrote');
+          const dir = path.join(process.env.RUNNER_TEMP, 'prep');
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'prep.json'), text.endsWith('\n') ? text : `${text}\n`);
+          console.log(`The prep file is JSON (${Buffer.byteLength(text)} bytes). The cut lints it against the facts it makes.`);
+          JS
+
+      # The one file the cut reads, under the name the cut downloads.
+      - name: Upload the prep artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prep
+          path: ${{ runner.temp }}/prep/prep.json
+          if-no-files-found: error
+          retention-days: 14
