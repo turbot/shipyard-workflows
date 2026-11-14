@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/turbot/shipyard/lib/prep-schema.json",
+  "title": "Shipyard prep file",
+  "description": "The one file the prep run returns: the level, the group of each PR, the release notes and the report's words. docs/prep-file.md explains each field.",
+  "type": "object",
+  "required": ["format", "level", "groups", "notes", "report"],
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "description": "The version of this format.",
+      "const": 1
+    },
+    "level": {
+      "description": "The level of the release, why, and an answer for each read-first flag in the facts.",
+      "type": "object",
+      "required": ["bump", "reasons", "flags"],
+      "additionalProperties": false,
+      "properties": {
+        "bump": {
+          "description": "The semver level of the release.",
+          "enum": ["major", "minor", "patch"]
+        },
+        "reasons": {
+          "description": "Why this level, one sentence each.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/text" }
+        },
+        "flags": {
+          "description": "An answer for each read-first flag in the facts.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["flag", "answer"],
+            "additionalProperties": false,
+            "properties": {
+              "flag": {
+                "description": "The id of the flag, as the facts name it.",
+                "$ref": "#/$defs/text"
+              },
+              "answer": {
+                "description": "What the prep run found, and what it means for the level.",
+                "$ref": "#/$defs/text"
+              }
+            }
+          }
+        }
+      }
+    },
+    "groups": {
+      "description": "The group of each PR in the range: every PR in exactly one group. A group with no PRs may be left out.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "Added": { "$ref": "#/$defs/prList" },
+        "Changed": { "$ref": "#/$defs/prList" },
+        "Fixed": { "$ref": "#/$defs/prList" },
+        "Removed": { "$ref": "#/$defs/prList" },
+        "Security": { "$ref": "#/$defs/prList" },
+        "Internal": { "$ref": "#/$defs/prList" }
+      }
+    },
+    "notes": {
+      "description": "The release notes, for users: public text with no internal term, private link or file path.",
+      "type": "object",
+      "required": ["title", "summary", "sections"],
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "description": "The title of the release notes.",
+          "$ref": "#/$defs/text"
+        },
+        "summary": {
+          "description": "One sentence of 140 characters or fewer.",
+          "$ref": "#/$defs/text",
+          "maxLength": 140
+        },
+        "sections": {
+          "description": "Items under short headings.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["heading", "items"],
+            "additionalProperties": false,
+            "properties": {
+              "heading": {
+                "description": "A short heading.",
+                "$ref": "#/$defs/text",
+                "maxLength": 60
+              },
+              "items": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["text", "covers"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "text": {
+                      "description": "The item, as users read it.",
+                      "$ref": "#/$defs/text"
+                    },
+                    "covers": {
+                      "description": "The PRs in the range this item is about.",
+                      "$ref": "#/$defs/prList",
+                      "minItems": 1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "report": {
+      "description": "The report's words: the top block of the release PR. Together they are 300 words or fewer.",
+      "type": "object",
+      "required": ["summary", "changes", "risks", "untested"],
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "description": "What this release is, in a sentence or two.",
+          "$ref": "#/$defs/text"
+        },
+        "changes": {
+          "description": "What changes for users, and what proves each change.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["change", "proof"],
+            "additionalProperties": false,
+            "properties": {
+              "change": { "$ref": "#/$defs/text" },
+              "proof": { "$ref": "#/$defs/text" }
+            }
+          }
+        },
+        "risks": {
+          "description": "The risks, and how to undo each one.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["risk", "undo"],
+            "additionalProperties": false,
+            "properties": {
+              "risk": { "$ref": "#/$defs/text" },
+              "undo": { "$ref": "#/$defs/text" }
+            }
+          }
+        },
+        "untested": {
+          "description": "What was not tested.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/text" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "text": {
+      "description": "Text with at least one character that is not a space.",
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "prList": {
+      "description": "PR numbers, each once.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 1 }
+    }
+  }
+}

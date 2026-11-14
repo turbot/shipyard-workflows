@@ -1,0 +1,332 @@
+# Writes the control record on a release PR: the six rows, the evidence committed on the
+# candidate, and HOLD in place of SHIP when a test, a smoke step or a check did not pass.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
+# commit. See the README for the caller.
+#
+# The caller runs it when the release PR opens and each time the PR, a review or a check changes.
+# Each run reads GitHub as it is now and replaces the record already in the PR body, so a run
+# that comes late or twice leaves the same record. The facts and the prep file are the ones
+# `shipyard cut` committed to `releases/<tag>/` on the candidate, so the job needs only the PR's
+# number and the results of the build, the tests and staging.
+#
+# Steps: read the PR's branch; check it out; make the record and commit the evidence
+# (`shipyard record`); push the evidence commit with the caller's token (`shipyard push`); wait
+# for GitHub to show the pushed commit as the PR's head; run the caller's required-check workflows
+# on it; wait for the other checks; write the body (`shipyard record --update`).
+# A push made with the job's own token starts no workflow, so this does not call itself, and the
+# checks the base branch's rules require would never run on the evidence commit. A
+# `workflow_dispatch` made with that token does start a run, so the job starts each workflow the
+# caller lists in `required-check-workflows` on the release branch, now at the pushed commit.
+
+name: Record a release
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: The release PR's number.
+        type: string
+        required: true
+      results-run:
+        description: The id of the Actions run of this repo that built, tested and staged the candidate. Its artifact `results` holds `results.json` (docs/release-record.md).
+        type: string
+        required: true
+      ignore-checks:
+        description: Comma-separated names of checks the record does not judge (this workflow's own check, for one).
+        type: string
+        required: false
+        default: ''
+      fleet-logins:
+        description: Comma-separated logins that are the fleet and never count as an independent approval, besides every bot account.
+        type: string
+        required: false
+        default: ''
+      armed-label:
+        description: The label whose author counts as having driven a change.
+        type: string
+        required: false
+        default: agent:ready
+      changelog:
+        description: The product's changelog, relative to the repo.
+        type: string
+        required: false
+        default: CHANGELOG.md
+      check-wait-minutes:
+        description: How long to wait, at most (0 to 60), for the candidate's other checks to finish before the record is written. A check still running then is shown as waiting, and the record is written again when this is run again.
+        type: string
+        required: false
+        default: '10'
+      required-check-workflows:
+        description: Comma-separated file names of this repo's workflows (in .github/workflows) that make the checks the base branch's rules require, such as `ci.yml`. Each must accept `workflow_dispatch`. After the evidence push, each is run on the release branch, so its checks land on the PR's new head.
+        type: string
+        required: false
+        default: ''
+
+permissions: {}
+
+jobs:
+  record:
+    name: record
+    runs-on: ubuntu-latest
+    timeout-minutes: 90   # the longest wait (60 minutes) and the rest of the job
+    # One record per PR at a time; a newer run waits for the one in flight.
+    concurrency:
+      group: shipyard-record-${{ github.repository }}-${{ inputs.pr }}
+      cancel-in-progress: false
+    permissions:
+      contents: write        # push the evidence commit to the candidate (the caller's token)
+      pull-requests: write   # write the record into the PR body
+      issues: read           # who wrote and armed each change's issue
+      checks: read           # the candidate's check runs
+      statuses: read         # and its commit statuses
+      actions: write         # download the results artifact; run the required-check workflows
+      id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
+    env:
+      PR: ${{ inputs.pr }}
+      RESULTS_RUN: ${{ inputs.results-run }}
+      IGNORE_CHECKS: ${{ inputs.ignore-checks }}
+      FLEET_LOGINS: ${{ inputs.fleet-logins }}
+      ARMED_LABEL: ${{ inputs.armed-label }}
+      CHANGELOG: ${{ inputs.changelog }}
+      WAIT_MINUTES: ${{ inputs.check-wait-minutes }}
+      CHECK_WORKFLOWS: ${{ inputs.required-check-workflows }}
+    steps:
+      - name: Check the inputs
+        shell: bash
+        run: |
+          fail() { echo "::error title=Record::$1"; exit 2; }
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || fail 'pr must be the release PR'"'"'s number'
+          [[ "$RESULTS_RUN" =~ ^[0-9]+$ ]] || fail 'results-run must be a run id (digits)'
+          [[ "$CHANGELOG" =~ ^[A-Za-z0-9._/-]+$ && "$CHANGELOG" != -* && "$CHANGELOG" != *..* && "$CHANGELOG" != /* ]] || fail 'changelog must be a path inside the repo'
+          [[ "$WAIT_MINUTES" =~ ^[0-9]+$ ]] && (( WAIT_MINUTES <= 60 )) || fail 'check-wait-minutes must be a whole number from 0 to 60'
+          IFS=$', \t' read -ra listed <<< "$(printf '%s' "$CHECK_WORKFLOWS" | tr '\n' ',')"
+          for w in "${listed[@]}"; do
+            if [[ -n "$w" && ! "$w" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]]; then
+              fail 'required-check-workflows must list file names of workflows in .github/workflows (ci.yml), comma-separated'
+            fi
+          done
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/record.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows record.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Record::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # Only a candidate of this repo: `shipyard record` checks the PR again, but the branch is
+      # named here, and an output is only used after it has matched the release branch pattern.
+      - name: Find the release PR's branch
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pull=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '[.head.ref, .head.repo.full_name, .state] | @tsv')
+          IFS=$'\t' read -r branch head_repo state <<< "$pull"
+          if [[ ! "$branch" =~ ^release/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error title=Record::#$PR does not come from a release/X.Y.Z branch, so it is not a release PR"
+            exit 1
+          fi
+          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+          if [[ "$(lower "$head_repo")" != "$(lower "$GITHUB_REPOSITORY")" ]]; then
+            echo "::error title=Record::#$PR comes from another repo ($head_repo), not a candidate of this one"
+            exit 1
+          fi
+          if [[ "$state" != "open" ]]; then
+            echo "::error title=Record::#$PR is $state: a record is written for an open candidate"
+            exit 1
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      # The candidate's own branch, with its history and tags. No credentials stay in the checkout.
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+          path: caller
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Get the results
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$RESULTS_RUN" --repo "$GITHUB_REPOSITORY" --name results --dir "$RUNNER_TEMP/results"
+          [[ -f "$RUNNER_TEMP/results/results.json" ]] || { echo "::error title=Record::the artifact 'results' of run $RESULTS_RUN holds no results.json"; exit 1; }
+
+      # The first pass reads the candidate and commits the evidence on it; the body is not written yet.
+      - name: Make the record and commit the evidence
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          args=()
+          if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
+          if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
+          node shipyard/bin/shipyard record --from-candidate --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
+            --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
+
+      - name: Push the evidence
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.pr.outputs.branch }}
+        run: node shipyard/bin/shipyard push --dir caller --branch "$BRANCH"
+
+      # GitHub shows a pushed commit as the PR's head a moment later; the record refuses a PR whose
+      # head is not the checkout's. Bounded: two minutes.
+      - name: Wait for the PR to show the pushed commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          want=$(git -C caller rev-parse HEAD)
+          for _ in $(seq 1 24); do
+            have=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)
+            if [[ "$have" == "$want" ]]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error title=Record::#$PR still shows ${have:0:7}, not the pushed ${want:0:7}, after two minutes"
+          exit 2
+
+      # The pushed commit got no checks: a push made with the job's own token starts no workflow.
+      # A `workflow_dispatch` made with it does, so each listed workflow is run on the release
+      # branch, which is now at the pushed commit, and the checks it makes land on the PR's head.
+      # Every listed workflow must exist and be enabled before any is started, so a wrong name
+      # starts none. One that already ran on this commit is not run again, so a run that comes
+      # again starts nothing new. Then wait, bounded (two minutes), for GitHub to show each run on
+      # the commit, so the wait for the other checks below can see their checks.
+      - name: Run the required checks on the pushed commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.pr.outputs.branch }}
+        run: |
+          fail() { echo "::error title=Record::$1"; exit 1; }
+          IFS=$', \t' read -ra listed <<< "$(printf '%s' "$CHECK_WORKFLOWS" | tr '\n' ',')"
+          workflows=()
+          for w in "${listed[@]}"; do
+            if [[ -n "$w" && " ${workflows[*]} " != *" $w "* ]]; then workflows+=("$w"); fi
+          done
+          if (( ${#workflows[@]} == 0 )); then
+            echo 'No required-check-workflows listed: nothing to run.'
+            exit 0
+          fi
+          head=$(git -C caller rev-parse HEAD)
+          # Sets `runs` to the number of runs of workflow $1 on the head; any doubt fails the job.
+          count_runs() {
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$1/runs?head_sha=$head&per_page=1" --jq .total_count) \
+              || fail "could not read the runs of the required-check workflow $1"
+            [[ "$runs" =~ ^[0-9]+$ ]] || fail "GitHub did not say how many runs the required-check workflow $1 has"
+          }
+          for w in "${workflows[@]}"; do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$w" --jq .state) \
+              || fail "the required-check workflow $w could not be found in $GITHUB_REPOSITORY"
+            [[ "$state" == active ]] || fail "the required-check workflow $w is $state, so it cannot be run"
+          done
+          started=()
+          for w in "${workflows[@]}"; do
+            count_runs "$w"
+            if (( runs > 0 )); then
+              echo "$w has already run on ${head:0:7}: not run again."
+              continue
+            fi
+            gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/$w/dispatches" -f ref="$BRANCH" > /dev/null \
+              || fail "the required-check workflow $w could not be run on $BRANCH: it must accept workflow_dispatch"
+            echo "Started $w on $BRANCH (${head:0:7})."
+            started+=("$w")
+          done
+          for _ in $(seq 1 24); do
+            missing=()
+            for w in "${started[@]}"; do
+              count_runs "$w"
+              if (( runs == 0 )); then missing+=("$w"); fi
+            done
+            if (( ${#missing[@]} == 0 )); then exit 0; fi
+            sleep 5
+          done
+          echo "::warning title=Record::after two minutes GitHub shows no run on ${head:0:7} of: ${missing[*]} (started on $BRANCH, which may have moved). See the PR's checks"
+
+      # A check from another workflow may still be running when the record is read, and a running
+      # check never turns the recommendation. So wait, bounded, until the checks of the pushed head
+      # and of the build's commit that are not this run's own, and not ignored, have finished.
+      - name: Wait for the candidate's other checks
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(git -C caller rev-parse HEAD)
+          source=$(jq -r .build.source "$RUNNER_TEMP/results/results.json")
+          unfinished() {
+            gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$1/check-runs?per_page=100" \
+              | jq -r --arg run "$GITHUB_RUN_ID" --arg ignore "$IGNORE_CHECKS" '
+                  ($ignore | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $skip
+                  | .check_runs[] | select(.status != "completed")
+                  | select(((.details_url // "") | contains("/actions/runs/" + $run + "/")) | not)
+                  | select(.name as $n | ($skip | index($n)) | not)
+                  | .name'
+          }
+          deadline=$((SECONDS + 60 * WAIT_MINUTES))
+          while :; do
+            # Each read on its own: a GitHub error on either stops the job, never "nothing is running".
+            on_head=$(unfinished "$head")
+            on_source=$(unfinished "$source")
+            waiting=$(printf '%s\n%s\n' "$on_head" "$on_source" | sed '/^$/d' | sort -u)
+            if [[ -z "$waiting" ]]; then exit 0; fi
+            if (( SECONDS >= deadline )); then
+              echo "::warning title=Record::still running after $WAIT_MINUTES minutes, so shown as waiting: $(echo "$waiting" | paste -sd, -). Run this again when they finish"
+              exit 0
+            fi
+            sleep 15
+          done
+
+      - name: Write the record into the PR body
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          args=()
+          if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
+          if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
+          node shipyard/bin/shipyard record --from-candidate --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
+            --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"

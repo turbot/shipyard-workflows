@@ -8,15 +8,29 @@ Shared release automation for Turbot repositories. Shipyard holds the reusable G
 - check the release PR, and ask the right people to approve it;
 - tag the release once it is live, and publish its changelog and release notes.
 
-**Status:** under construction. Nothing here is ready to use yet.
+**Status:** under construction. The `changelog-line`, `cut` and `record` workflows are ready; the rest is on its way.
 
-## How a repository uses Shipyard
+## Published from turbot/shipyard
 
-A repository declares its release settings in `.github/release.json` and calls Shipyard's workflows from a small workflow of its own, pinned to a released commit of Shipyard.
+This repository is a published copy. Its source is turbot/shipyard, and every Shipyard release publishes it here: the workflows land in `.github/workflows/`, with the scripts they run in `bin/` and `lib/`, as one commit tagged with the release's version (`v1.2.3`).
 
-## How Shipyard changes
+Nothing is written here by hand. The repository's rules let only the publish job write a branch or a tag.
 
-Work lands on `develop` by reviewed pull request. A Shipyard release is an approved pull request into `main`. Callers pin to a released commit, and an automated pull request moves the pin.
+## Pin by commit
+
+Call a workflow at a full 40-character commit, never a tag or a branch:
+
+```yaml
+jobs:
+  changelog-line:
+    uses: turbot/shipyard-workflows/.github/workflows/changelog-line.yml@<40-character commit sha>
+```
+
+A tag tells you which release a commit is; the commit is what you pin. A workflow checks out this repository at its own commit and runs the scripts from there, so a pinned caller runs exactly the code it pinned.
+
+## No pull requests
+
+Pull requests are not accepted here: a change made in this repository would be replaced by the next release. Shipyard changes in its source repository, where work lands on `develop` by reviewed pull request and a release is an approved pull request into `main`.
 
 ## License
 

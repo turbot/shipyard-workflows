@@ -1,0 +1,183 @@
+# Starts a release of a product repo, or watches the prep jobs for timeouts.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows. The control repo calls that copy pinned by
+# commit, from a schedule (daily, weekly), from a `release:now` PR event and by hand. The
+# caller is the repo the prep jobs are filed in; it holds the family files and the tokens.
+#
+#   inputs.repo     the product repo, `<owner>/<name>` (leave out when `watch` is true)
+#   one of          `cadence` (daily or weekly), `branch` (by hand) or `pr` (a release:now PR)
+#   inputs.wait     with `pr`, minutes to wait for the full check on its merge commit (at most 180)
+#   inputs.watch    run `shipyard start-watch` (the timeouts) instead of a start
+#
+# Nothing a caller passes is put into a shell line: every input goes through an environment
+# variable and is quoted there. See docs/release-start.md.
+
+name: Release start
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: The product repo, <owner>/<name>
+        type: string
+        default: ''
+      cadence:
+        description: daily or weekly
+        type: string
+        default: ''
+      branch:
+        description: Start this branch by hand
+        type: string
+        default: ''
+      pr:
+        description: A merged pull request labelled release:now
+        type: string
+        default: ''
+      wait:
+        description: With pr, how many minutes (at most 180) to wait for the repo's full check
+        type: string
+        default: ''
+      watch:
+        description: Run the timeouts of the open prep jobs instead of a start
+        type: boolean
+        default: false
+    secrets:
+      product_token:
+        description: Reads the product repo and comments on its release PR. The workflow's own token when left out.
+        required: false
+      jobs_token:
+        description: Writes issues in the repo that calls this. The workflow's own token when left out.
+        required: false
+
+permissions: {}
+
+# One run at a time for each product and trigger: a daily start never queues behind a release:now
+# that is waiting for its check, and a second run of the same trigger waits its turn.
+concurrency:
+  group: release-start-${{ inputs.watch && 'watch' || format('{0}-{1}', inputs.repo, inputs.pr || inputs.branch || inputs.cadence) }}
+  cancel-in-progress: false
+
+jobs:
+  start:
+    name: start
+    runs-on: ubuntu-latest
+    timeout-minutes: 200  # a release:now start may wait up to 180 minutes for its full check
+    permissions:
+      contents: read   # check out the family files, and the product repo with the workflow's own token
+      issues: write    # file the prep job, and ask the approvers, in the calling repo
+      id-token: write  # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          WATCH: ${{ inputs.watch }}
+          PRODUCT: ${{ inputs.repo }}
+          CADENCE: ${{ inputs.cadence }}
+          BRANCH: ${{ inputs.branch }}
+          PR: ${{ inputs.pr }}
+          WAIT: ${{ inputs.wait }}
+        run: |
+          if [ "$WATCH" = "true" ]; then
+            [ -z "$PRODUCT$CADENCE$BRANCH$PR$WAIT" ] || { echo "::error title=Release start::watch takes no repo, cadence, branch, pr or wait"; exit 2; }
+            exit 0
+          fi
+          [ -n "$PRODUCT" ] || { echo "::error title=Release start::repo is required"; exit 2; }
+          n=0
+          for v in "$CADENCE" "$BRANCH" "$PR"; do [ -z "$v" ] || n=$((n + 1)); done
+          [ "$n" -eq 1 ] || { echo "::error title=Release start::give exactly one of cadence, branch and pr"; exit 2; }
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/release-start.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows release-start.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Release start::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The family files live in the calling repo, on its default branch.
+      - name: Check out the family files
+        if: ${{ !inputs.watch }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: control
+          sparse-checkout: families
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      # The whole history and every tag: the range starts at the newest release tag.
+      - name: Check out the product repo
+        if: ${{ !inputs.watch }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.repo }}
+          token: ${{ secrets.product_token || github.token }}
+          path: product
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Start the release
+        if: ${{ !inputs.watch }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.product_token || github.token }}
+          SHIPYARD_JOBS_TOKEN: ${{ secrets.jobs_token || github.token }}
+          JOBS_REPO: ${{ github.repository }}
+          PRODUCT: ${{ inputs.repo }}
+          CADENCE: ${{ inputs.cadence }}
+          BRANCH: ${{ inputs.branch }}
+          PR: ${{ inputs.pr }}
+          WAIT: ${{ inputs.wait }}
+        run: |
+          args=(--repo "$PRODUCT" --dir product --families control/families --jobs-repo "$JOBS_REPO")
+          [ -z "$CADENCE" ] || args+=(--cadence "$CADENCE")
+          [ -z "$BRANCH" ] || args+=(--branch "$BRANCH")
+          [ -z "$PR" ] || args+=(--pr "$PR")
+          [ -z "$WAIT" ] || args+=(--wait "$WAIT")
+          code=0
+          node shipyard/bin/shipyard start "${args[@]}" || code=$?
+          # 3: a release:now start waits for its full check. Run it again when the check finishes.
+          if [ "$code" -eq 3 ]; then
+            echo "::notice title=Release start::waiting for the full check; run this again when it finishes"
+            exit 0
+          fi
+          exit "$code"
+
+      - name: Watch the prep jobs
+        if: ${{ inputs.watch }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.product_token || github.token }}
+          SHIPYARD_JOBS_TOKEN: ${{ secrets.jobs_token || github.token }}
+          JOBS_REPO: ${{ github.repository }}
+        run: node shipyard/bin/shipyard start-watch --jobs-repo "$JOBS_REPO"

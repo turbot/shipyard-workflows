@@ -1,0 +1,134 @@
+# The required status on every PR into `main` and `main-*`: the ten rules of a release
+# candidate (docs/release-check.md). It sets the commit status `release-check` on the PR's head.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
+# commit. See docs/release-check.md for the caller.
+#
+# Nothing here runs the candidate's code: git is asked for commits, trees and blobs, and the
+# PR's text is data. Shipyard runs at the commit this workflow itself was called at.
+
+name: Release check
+
+on:
+  workflow_call:
+    inputs:
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        default: v
+      changelog:
+        description: The product's changelog, relative to the repo.
+        type: string
+        default: CHANGELOG.md
+      approvers:
+        description: The area's approver team, as <org>/<team-slug>. Only its members' /level comments count.
+        type: string
+        default: ''
+      product:
+        description: The product a `/level <level> <product>` comment must name to count, in a repo with several.
+        type: string
+        default: ''
+      automation-logins:
+        description: 'The accounts that open release PRs, comma-separated. Required: a PR opened by any other account fails rule 1.'
+        type: string
+        required: true
+      fleet-logins:
+        description: Accounts whose reviews never count, comma-separated, beside every bot account.
+        type: string
+        default: ''
+      armed-label:
+        description: The label whose author drove a change.
+        type: string
+        default: agent:ready
+    secrets:
+      org-token:
+        description: A token that can read the approver team's members and the sibling PRs of a pair, train or wave.
+        required: false
+
+permissions: {}
+
+jobs:
+  release-check:
+    name: release-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # One run per PR at a time, the newest event last: an older run that read an approval since
+    # dismissed must never write its status after a newer one.
+    concurrency:
+      group: release-check-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read        # every branch and tag of the repo, to read the candidate's history
+      pull-requests: read   # the PR, the changes in the release and their reviews
+      issues: read          # /level comments and who armed each change
+      statuses: write       # the release-check status on the PR's head
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      # Every branch and tag; nothing from the checkout is ever run.
+      - name: Check out the repo's history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: caller
+          fetch-depth: 0
+          persist-credentials: false
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/release-check.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows release-check.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Release check::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # Inputs reach the command as environment, never as shell text.
+      - name: Run the release check
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SHIPYARD_ORG_TOKEN: ${{ secrets.org-token }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          CHANGELOG_PATH: ${{ inputs.changelog }}
+          APPROVERS: ${{ inputs.approvers }}
+          PRODUCT: ${{ inputs.product }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          FLEET_LOGINS: ${{ inputs.fleet-logins }}
+          ARMED_LABEL: ${{ inputs.armed-label }}
+        run: |
+          args=(--dir caller --tag-prefix "$TAG_PREFIX" --changelog "$CHANGELOG_PATH" --armed-label "$ARMED_LABEL")
+          [ -n "$APPROVERS" ] && args+=(--approvers "$APPROVERS")
+          [ -n "$PRODUCT" ] && args+=(--product "$PRODUCT")
+          # Never empty: with no one named, any bot account that opens a release/ PR would pass rule 1.
+          if [ -z "${AUTOMATION_LOGINS//[[:space:],]/}" ]; then echo "::error::automation-logins names no account: name the accounts that open release PRs"; exit 1; fi
+          args+=(--automation-logins "$AUTOMATION_LOGINS")
+          [ -n "$FLEET_LOGINS" ] && args+=(--fleet-logins "$FLEET_LOGINS")
+          node shipyard/bin/shipyard release-check "${args[@]}"

@@ -1,0 +1,209 @@
+# Cuts a release: from the prep run's file to a pushed `release/<version>` branch and the
+# `release-pr` artifact the fleet's release-PR hook opens the PR from.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
+# commit. See the README for the caller.
+#
+# It runs in the product repo, on its working branch, as the caller's own job: the hook takes
+# only a run of the workflow the repo's declaration names, in that repo. The steps, in order, each
+# stopping the job when it fails, so nothing is pushed after a refusal:
+#   1. make the facts at the prep job's commit (`shipyard facts`);
+#   2. check the prep file against those facts (`shipyard lint-prep`), so a prep file made for
+#      another commit, or one that fails the lint, never gets further;
+#   3. cut (`shipyard cut`): the branch, the CHANGELOG section and the notes, the artifact;
+#   4. push the branch with the caller's token (`shipyard push`), and check the remote holds it;
+#   5. upload the artifact: the files `branch`, `sha`, `title` and `body.md`.
+#
+# Nothing from the caller's inputs goes into a shell line: each reaches a step as an environment
+# variable and is checked there. The caller's code is never run with the token in its environment.
+
+name: Cut a release
+
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: The full 40-character commit the prep job read. The facts end here; the release is cut from it, and it must be in the history of the commit this run started from.
+        type: string
+        required: true
+      prep-run:
+        description: The id of the Actions run of this repo that made the prep file. Its artifact `prep` holds `prep.json`. Give this or `prep-file`.
+        type: string
+        required: false
+        default: ''
+      prep-file:
+        description: A path in this repo, read at the commit this run started from, for a prep file made by hand (a person starting the cut). Give this or `prep-run`.
+        type: string
+        required: false
+        default: ''
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        required: false
+        default: v
+      base:
+        description: The branch the release PR goes into.
+        type: string
+        required: false
+        default: main
+      changelog:
+        description: The product's changelog, relative to the repo.
+        type: string
+        required: false
+        default: CHANGELOG.md
+
+permissions: {}
+
+jobs:
+  cut:
+    name: cut
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Two cuts at once would race for the same branch.
+    concurrency:
+      group: shipyard-cut-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write       # push release/<version> (the caller's token)
+      pull-requests: read   # the facts read each PR; the cut looks for candidates holding a number
+      actions: read         # download the prep job's artifact
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    env:
+      COMMIT: ${{ inputs.commit }}
+      PREP_RUN: ${{ inputs.prep-run }}
+      PREP_FILE: ${{ inputs.prep-file }}
+      TAG_PREFIX: ${{ inputs.tag-prefix }}
+      BASE: ${{ inputs.base }}
+      CHANGELOG: ${{ inputs.changelog }}
+    steps:
+      - name: Check the inputs
+        shell: bash
+        run: |
+          fail() { echo "::error title=Cut::$1"; exit 2; }
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail 'commit must be a full 40-character commit id'
+          if [[ -n "$PREP_RUN" && -n "$PREP_FILE" ]]; then fail 'name the prep file once: prep-run or prep-file, not both'; fi
+          if [[ -z "$PREP_RUN" && -z "$PREP_FILE" ]]; then fail 'name the prep file: prep-run (the prep job'"'"'s run) or prep-file (a path in the repo)'; fi
+          if [[ -n "$PREP_RUN" && ! "$PREP_RUN" =~ ^[0-9]+$ ]]; then fail 'prep-run must be a run id (digits)'; fi
+          if [[ "$PREP_FILE" == -* || "$PREP_FILE" == *..* ]]; then fail 'prep-file must be a path inside the repo'; fi
+          [[ "$TAG_PREFIX" =~ ^[A-Za-z0-9._-]*$ ]] || fail 'tag-prefix may hold only letters, digits, dot, underscore and hyphen'
+          [[ "$BASE" =~ ^[A-Za-z0-9._/-]+$ && "$BASE" != -* ]] || fail 'base must be a branch name'
+          [[ "$CHANGELOG" =~ ^[A-Za-z0-9._/-]+$ && "$CHANGELOG" != -* && "$CHANGELOG" != *..* && "$CHANGELOG" != /* ]] || fail 'changelog must be a path inside the repo'
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/cut.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows cut.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Cut::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The prep job's commit, with every tag and branch: the facts read the tags, the cut looks at
+      # the remote branches, and the push checks the commit is in the history of this run's own.
+      # No credentials stay in the checkout: the facts' detector is the repo's own code.
+      - name: Check out the repo at the prep job's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          path: caller
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      # The prep file comes from the prep job (its run's artifact) or, for a person starting the cut,
+      # from a path in the repo at the commit this run started from. It is checked in the next steps.
+      - name: Get the prep file
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          if [[ -n "$PREP_RUN" ]]; then
+            conclusion=$(gh run view "$PREP_RUN" --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)
+            if [[ "$conclusion" != "success" ]]; then
+              echo "::error title=Cut::run $PREP_RUN of this repo did not succeed (it is '$conclusion'), so its prep file is not used"
+              exit 1
+            fi
+            gh run download "$PREP_RUN" --repo "$GITHUB_REPOSITORY" --name prep --dir "$RUNNER_TEMP/prep-download"
+            [[ -f "$RUNNER_TEMP/prep-download/prep.json" ]] || { echo "::error title=Cut::the artifact 'prep' of run $PREP_RUN holds no prep.json"; exit 1; }
+            mv "$RUNNER_TEMP/prep-download/prep.json" "$RUNNER_TEMP/release/prep.json"
+          else
+            git -C caller show "$GITHUB_SHA:$PREP_FILE" > "$RUNNER_TEMP/release/prep.json" \
+              || { echo "::error title=Cut::cannot read $PREP_FILE at $GITHUB_SHA"; exit 2; }
+          fi
+
+      - name: Make the facts
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node shipyard/bin/shipyard facts --repo "$GITHUB_REPOSITORY" --to "$COMMIT" --tag-prefix "$TAG_PREFIX" --dir caller --out "$RUNNER_TEMP/release/facts.json"
+
+      # Refuses a prep file made for another range, and one that fails the lint: the job stops here.
+      - name: Check the prep file against the facts
+        shell: bash
+        run: node shipyard/bin/shipyard lint-prep "$RUNNER_TEMP/release/prep.json" --facts "$RUNNER_TEMP/release/facts.json"
+
+      - name: Cut the release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          node shipyard/bin/shipyard cut \
+            --facts "$RUNNER_TEMP/release/facts.json" --prep "$RUNNER_TEMP/release/prep.json" \
+            --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG"
+
+      # The only step that pushes. It checks the artifact's files agree with the branch's tip and that
+      # the commit the facts read is in the history of the commit this run started from.
+      - name: Push the release branch
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          branch=$(cat "$RUNNER_TEMP/release/release-pr/branch")
+          node shipyard/bin/shipyard push --dir caller --branch "$branch" --artifact "$RUNNER_TEMP/release/release-pr" --within "$GITHUB_SHA"
+
+      # The four files the hook reads, and no others.
+      - name: Upload the release-pr artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-pr
+          path: |
+            ${{ runner.temp }}/release/release-pr/branch
+            ${{ runner.temp }}/release/release-pr/sha
+            ${{ runner.temp }}/release/release-pr/title
+            ${{ runner.temp }}/release/release-pr/body.md
+          if-no-files-found: error
+          retention-days: 14

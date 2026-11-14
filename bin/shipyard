@@ -1,0 +1,43 @@
+#!/usr/bin/env node
+'use strict';
+
+// One CLI for every Shipyard step: `node bin/shipyard <step> [options]`.
+// A step lives in lib/<step>-command.js and exports run(argv, io) -> exit code.
+
+const STEPS = {
+  'changelog-line': () => require('../lib/changelog-line-command'),
+  'lint-prep': () => require('../lib/lint-prep-command'),
+  facts: () => require('../lib/facts-command'),
+  changelog: () => require('../lib/changelog-command'),
+  cut: () => require('../lib/cut-command'),
+  'release-check': () => require('../lib/release-check-command'),
+  push: () => require('../lib/push-command'),
+  record: () => require('../lib/record-command'),
+  start: () => require('../lib/start-command'),
+  'start-watch': () => require('../lib/start-watch-command'),
+  'private-data': () => require('../lib/private-data-command'),
+  publish: () => require('../lib/publish-command'),
+};
+
+async function main(argv) {
+  const [step, ...rest] = argv;
+  if (!step || step === '--help' || step === '-h') {
+    process.stdout.write(`Usage: shipyard <step> [options]\n\nSteps:\n${Object.keys(STEPS).map((s) => `  ${s}`).join('\n')}\n`);
+    return step ? 0 : 2;
+  }
+  if (!Object.hasOwn(STEPS, step)) {
+    process.stderr.write(`shipyard: unknown step "${step}". Steps: ${Object.keys(STEPS).join(', ')}\n`);
+    return 2;
+  }
+  return STEPS[step]().run(rest, { env: process.env, stdout: process.stdout, stderr: process.stderr });
+}
+
+main(process.argv.slice(2)).then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (err) => {
+    process.stderr.write(`shipyard: ${err && err.message ? err.message : err}\n`);
+    process.exitCode = 2;
+  },
+);
