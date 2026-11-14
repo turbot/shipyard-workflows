@@ -6,6 +6,12 @@
 # commit. See the README for the caller.
 #
 # The caller runs it when the release PR opens and each time the PR, a review or a check changes.
+# A review is the one change that pushes nothing: the repo's `main` ruleset dismisses an approval
+# when a commit is pushed, so a record that committed evidence after an approval would dismiss the
+# approval it came to record. With `review: true` the second job runs and the first does not. It
+# reads the evidence already committed on the candidate, the reviews and the checks, and writes the
+# body (`shipyard record --from-evidence --update`). Its token cannot push, it commits nothing, runs
+# no check again, and with no evidence at the head it writes HOLD with the reason.
 # Each run reads GitHub as it is now and replaces the record already in the PR body, so a run
 # that comes late or twice leaves the same record. The facts and the prep file are the ones
 # `shipyard cut` committed to `releases/<tag>/` on the candidate, so the job needs only the PR's
@@ -31,9 +37,15 @@ on:
         type: string
         required: true
       results-run:
-        description: The id of the Actions run of this repo that built, tested and staged the candidate. Its artifact `results` holds `results.json` (docs/release-record.md).
+        description: The id of the Actions run of this repo that built, tested and staged the candidate. Its artifact `results` holds `results.json` (docs/release-record.md). Required unless `review` is true.
         type: string
-        required: true
+        required: false
+        default: ''
+      review:
+        description: True when a review was submitted or dismissed. The record is read again from the evidence already committed on the candidate and only the PR body is written; nothing is committed, pushed or run again.
+        type: boolean
+        required: false
+        default: false
       ignore-checks:
         description: Comma-separated names of checks the record does not judge (this workflow's own check, for one).
         type: string
@@ -70,6 +82,7 @@ permissions: {}
 jobs:
   record:
     name: record
+    if: ${{ !inputs.review }}
     runs-on: ubuntu-latest
     timeout-minutes: 90   # the longest wait (60 minutes) and the rest of the job
     # One record per PR at a time; a newer run waits for the one in flight.
@@ -99,7 +112,7 @@ jobs:
         run: |
           fail() { echo "::error title=Record::$1"; exit 2; }
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] || fail 'pr must be the release PR'"'"'s number'
-          [[ "$RESULTS_RUN" =~ ^[0-9]+$ ]] || fail 'results-run must be a run id (digits)'
+          [[ "$RESULTS_RUN" =~ ^[0-9]+$ ]] || fail 'results-run must be a run id (digits), unless review is true'
           [[ "$CHANGELOG" =~ ^[A-Za-z0-9._/-]+$ && "$CHANGELOG" != -* && "$CHANGELOG" != *..* && "$CHANGELOG" != /* ]] || fail 'changelog must be a path inside the repo'
           [[ "$WAIT_MINUTES" =~ ^[0-9]+$ ]] && (( WAIT_MINUTES <= 60 )) || fail 'check-wait-minutes must be a whole number from 0 to 60'
           IFS=$', \t' read -ra listed <<< "$(printf '%s' "$CHECK_WORKFLOWS" | tr '\n' ',')"
@@ -343,4 +356,119 @@ jobs:
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
           node shipyard/bin/shipyard record --from-candidate --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
+            --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
+
+  # A review: the same record, read again from what the candidate already holds. No evidence is
+  # made, nothing is pushed, no check is run again and no results artifact is read. The job is
+  # named `record` as the first is, so the caller's `ignore-checks` names its check too. Its group
+  # is its own, so a review never replaces a record waiting in the first job's group (a push's run
+  # must not be lost). A review that reads a head while that record is still pushing finds the PR
+  # moved when it writes, and is refused (`shipyard record` refuses a PR that moved while it read).
+  record-review:
+    name: record
+    if: ${{ inputs.review }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: shipyard-record-review-${{ github.repository }}-${{ inputs.pr }}
+      cancel-in-progress: false
+    permissions:
+      contents: read         # the candidate's committed evidence; this job cannot push
+      pull-requests: write   # write the record into the PR body
+      issues: read           # who wrote and armed each change's issue
+      checks: read           # the candidate's check runs
+      statuses: read         # and its commit statuses
+      id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
+    env:
+      PR: ${{ inputs.pr }}
+      IGNORE_CHECKS: ${{ inputs.ignore-checks }}
+      FLEET_LOGINS: ${{ inputs.fleet-logins }}
+      ARMED_LABEL: ${{ inputs.armed-label }}
+      CHANGELOG: ${{ inputs.changelog }}
+    steps:
+      - name: Check the review's inputs
+        shell: bash
+        run: |
+          fail() { echo "::error title=Record::$1"; exit 2; }
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || fail 'pr must be the release PR'"'"'s number'
+          [[ "$CHANGELOG" =~ ^[A-Za-z0-9._/-]+$ && "$CHANGELOG" != -* && "$CHANGELOG" != *..* && "$CHANGELOG" != /* ]] || fail 'changelog must be a path inside the repo'
+
+      - name: Find this workflow's commit for the review
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/record.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows record.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Record::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit for the review
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      - name: Find the release PR's branch for the review
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pull=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '[.head.ref, .head.repo.full_name, .state] | @tsv')
+          IFS=$'\t' read -r branch head_repo state <<< "$pull"
+          if [[ ! "$branch" =~ ^release/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error title=Record::#$PR does not come from a release/X.Y.Z branch, so it is not a release PR"
+            exit 1
+          fi
+          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+          if [[ "$(lower "$head_repo")" != "$(lower "$GITHUB_REPOSITORY")" ]]; then
+            echo "::error title=Record::#$PR comes from another repo ($head_repo), not a candidate of this one"
+            exit 1
+          fi
+          if [[ "$state" != "open" ]]; then
+            echo "::error title=Record::#$PR is $state: a record is written for an open candidate"
+            exit 1
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      # The candidate as the PR has it now, with its history and tags. No credentials stay in the checkout.
+      - name: Check out the candidate for the review
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+          path: caller
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Write the record into the PR body from the committed evidence
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          args=()
+          if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
+          if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
+          node shipyard/bin/shipyard record --from-evidence --update --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"

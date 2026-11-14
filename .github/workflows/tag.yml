@@ -18,7 +18,7 @@
 #
 # The release App's token is made here, in the `tag` job, which runs in the caller's `release`
 # environment (docs/release-apps.md): `vars.RELEASE_APP_CLIENT_ID` and `secrets.RELEASE_APP_PRIVATE_KEY`,
-# for this repo only, with contents write and pull-requests write. The caller passes no token: a job
+# for this repo only, with contents write and pull-requests write (and, with `merge-back` on, checks read and commit statuses read). The caller passes no token: a job
 # that calls a reusable workflow runs no steps, and GitHub drops a job output that holds a secret. It
 # passes the key by name only, as GitHub asks of an environment secret a called workflow reads; the
 # value is the environment's. The job never falls back to its own token: with either name missing it
@@ -27,7 +27,8 @@
 # Nothing here checks out the caller's repo or runs its code: GitHub is asked for the PR, the tags,
 # the commit, and its CHANGELOG and release notes files, and the PR's text is data. The job's own
 # token only reads (and, in the `shipped` job, starts the caller's workflow); the release App's token
-# is in the environment of the last step alone, and it is what makes the tag, the Release and the comment.
+# is in the environment of the last two steps alone: the first makes the tag, the Release and the comment,
+# the second (once the tag is made) merges the release back into the work branch the candidate came from.
 
 name: Tag
 
@@ -54,6 +55,10 @@ on:
         description: Move the repo's floating major tag (v0, v1) to each release that is the newest of its major.
         type: boolean
         default: false
+      merge-back:
+        description: After the tag, open a PR from the release branch into the work branch the candidate was cut from, and merge it with a merge commit once its checks pass. The release App then needs pull requests and contents write, and checks and commit statuses read.
+        type: boolean
+        default: true
       product:
         description: 'The product''s name, for a GitHub Release title when the release has no release notes ("<product> <version>"). Default: the repo''s name.'
         type: string
@@ -138,7 +143,7 @@ jobs:
     name: tag
     if: ${{ github.event_name != 'issue_comment' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 35   # the merge-back waits up to 20 minutes for the PR's checks
     environment: release    # the caller's: RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY (docs/release-apps.md)
     permissions:
       contents: read        # the tags, the merge commit, and its changelog and release notes
@@ -201,7 +206,7 @@ jobs:
           path: shipyard
           persist-credentials: false
 
-      # For this repo only, with only what the tag step writes. The action revokes it when the job ends.
+      # For this repo only, with only what the tag and merge-back steps use. The action revokes it when the job ends.
       - name: Make the release App's token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -211,9 +216,14 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: write
+          # The merge-back waits for the PR's checks, and the job's own token reads neither. Left empty (not asked for)
+          # when the caller turns the merge-back off, so an App without them still makes its token.
+          permission-checks: ${{ inputs.merge-back && 'read' || '' }}
+          permission-statuses: ${{ inputs.merge-back && 'read' || '' }}
 
       # Inputs reach the command as environment, never as shell text.
       - name: Tag the release
+        id: tag
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -234,3 +244,15 @@ jobs:
           [ -n "$SHIP_RESULT" ] && args+=(--ship-result "$SHIP_RESULT")
           [ "$FLOATING_MAJOR" = "true" ] && args+=(--floating-major)
           node shipyard/bin/shipyard tag "${args[@]}"
+
+      # Only for a release that is tagged (the step above says which). It fails, leaving the PR open,
+      # when the merge cannot be done: the tag stays, and the message says what to do.
+      - name: Merge the release back
+        if: ${{ inputs.merge-back && steps.tag.outputs.tag != '' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.app.outputs.token }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+        run: node shipyard/bin/shipyard merge-back --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS"

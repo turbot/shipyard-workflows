@@ -14,6 +14,7 @@ const STEPS = {
   push: () => require('../lib/push-command'),
   record: () => require('../lib/record-command'),
   tag: () => require('../lib/tag-command'),
+  'merge-back': () => require('../lib/merge-back-command'),
   start: () => require('../lib/start-command'),
   'start-watch': () => require('../lib/start-watch-command'),
   'private-data': () => require('../lib/private-data-command'),

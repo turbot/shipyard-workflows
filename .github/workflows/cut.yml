@@ -181,9 +181,13 @@ jobs:
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
+          # The branch this run started on is the work branch the candidate comes from: the cut commit
+          # records it, and the merge-back after the tag reads it. A run on a tag records none.
+          work=()
+          if [ "$GITHUB_REF_TYPE" = "branch" ]; then work=(--work-branch "$GITHUB_REF_NAME"); fi
           node shipyard/bin/shipyard cut \
             --facts "$RUNNER_TEMP/release/facts.json" --prep "$RUNNER_TEMP/release/prep.json" \
-            --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG"
+            --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" "${work[@]}"
 
       # The only step that pushes. It checks the artifact's files agree with the branch's tip and that
       # the commit the facts read is in the history of the commit this run started from.
