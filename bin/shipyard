@@ -17,6 +17,7 @@ const STEPS = {
   'merge-back': () => require('../lib/merge-back-command'),
   start: () => require('../lib/start-command'),
   'start-watch': () => require('../lib/start-watch-command'),
+  pin: () => require('../lib/pin-command'),
   'private-data': () => require('../lib/private-data-command'),
   publish: () => require('../lib/publish-command'),
 };

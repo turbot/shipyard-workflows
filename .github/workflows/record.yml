@@ -20,12 +20,17 @@
 # Steps: read the PR's branch; check it out; make the record and commit the evidence
 # (`shipyard record`); push the evidence commit with the caller's token (`shipyard push`); wait
 # for GitHub to show the pushed commit as the PR's head; run the caller's required-check workflows
-# on it; wait for the other checks; write the body (`shipyard record --update`).
+# on it; wait for the other checks; report each dispatched run's jobs as commit statuses on the
+# pushed commit; write the body (`shipyard record --update`).
 # A push made with the job's own token starts no workflow that runs (GitHub holds its `pull_request`
 # runs for a person's approval), so this does not call itself, and the
 # checks the base branch's rules require would never run on the evidence commit. A
 # `workflow_dispatch` made with that token does start a run, so the job starts each workflow the
 # caller lists in `required-check-workflows` on the release branch, now at the pushed commit.
+# GitHub does not count a `workflow_dispatch` run's checks for a required check of a ruleset, so
+# the job also posts each finished dispatched run's jobs as commit statuses on the pushed commit,
+# named as the checks are: a status reports a real run of the repo's tests on that exact commit,
+# and nothing is approved by hand. The held `pull_request` runs stay held and are never approved.
 
 name: Record a release
 
@@ -37,7 +42,7 @@ on:
         type: string
         required: true
       results-run:
-        description: The id of the Actions run of this repo that built, tested and staged the candidate. Its artifact `results` holds `results.json` (docs/release-record.md). Required unless `review` is true.
+        description: The id of the Actions run of this repo that built, tested and staged the candidate. Its artifact `results` holds `results.json`, and `template-diff.txt` and `prod-plan.txt` when the repo's `.github/release.json` switches them on (docs/release-record.md). Required unless `review` is true.
         type: string
         required: false
         default: ''
@@ -67,7 +72,7 @@ on:
         required: false
         default: CHANGELOG.md
       check-wait-minutes:
-        description: How long to wait, at most (0 to 60), for the candidate's other checks to finish before the record is written. A check still running then is shown as waiting, and the record is written again when this is run again.
+        description: How long to wait, at most (0 to 60), for the candidate's other checks to finish before the record is written, and again for each run of `required-check-workflows` to finish before its result is posted as a commit status. A check still running then is shown as waiting, and the record is written again when this is run again.
         type: string
         required: false
         default: '10'
@@ -84,7 +89,7 @@ jobs:
     name: record
     if: ${{ !inputs.review }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90   # the longest wait (60 minutes) and the rest of the job
+    timeout-minutes: 150   # the two longest waits (60 minutes each: the other checks, then the dispatched runs) and the rest of the job
     # One record per PR at a time; a newer run waits for the one in flight.
     concurrency:
       group: shipyard-record-${{ github.repository }}-${{ inputs.pr }}
@@ -94,7 +99,7 @@ jobs:
       pull-requests: write   # write the record into the PR body
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
-      statuses: read         # and its commit statuses
+      statuses: write        # read its commit statuses, and post the dispatched runs' results as statuses on the evidence commit
       actions: write         # download the results artifact; run the required-check workflows
       id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
     env:
@@ -344,6 +349,99 @@ jobs:
               exit 0
             fi
             sleep 15
+          done
+
+      # GitHub does not count the checks of a `workflow_dispatch` run for a required check of a
+      # ruleset, even when they pass on the PR's head, and the `pull_request` runs of the pushed
+      # commit stay held for a person. So each job of the dispatched run is reported as a commit
+      # status on the head, named as the job's check is (`private-data`, `test`), in the state the
+      # job ended in, with the run's URL as its target. A status only ever reports a real run:
+      # a `workflow_dispatch` run of a listed workflow, on this release branch, at this exact
+      # head, that has finished. A run still going, held, cancelled or skipped, and a job that
+      # was skipped, post nothing, so the check stays missing and the PR stays blocked. A job that
+      # failed posts a failure. Each run is waited for, bounded by `check-wait-minutes`; run this
+      # again after one that ran longer: a status already posted for the same run is not posted twice.
+      - name: Report the dispatched runs as commit statuses
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.pr.outputs.branch }}
+        run: |
+          fail() { echo "::error title=Record::$1"; exit 1; }
+          IFS=$', \t' read -ra listed <<< "$(printf '%s' "$CHECK_WORKFLOWS" | tr '\n' ',')"
+          workflows=()
+          for w in "${listed[@]}"; do
+            if [[ -n "$w" && " ${workflows[*]} " != *" $w "* ]]; then workflows+=("$w"); fi
+          done
+          if (( ${#workflows[@]} == 0 )); then
+            echo 'No required-check-workflows listed: no status to post.'
+            exit 0
+          fi
+          head=$(git -C caller rev-parse HEAD)
+          short=${head:0:7}
+          # Each run is waited for, bounded by the same minutes as the other checks: it may not be shown
+          # yet, or still going, when the wait above ends.
+          deadline=$((SECONDS + 60 * WAIT_MINUTES))
+          for w in "${workflows[@]}"; do
+            while :; do
+              # The newest `workflow_dispatch` run of this workflow on the release branch at the head.
+              runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$w/runs?head_sha=$head&event=workflow_dispatch&per_page=100") \
+                || fail "could not read the runs of the required-check workflow $w"
+              run=$(jq -r --arg head "$head" --arg branch "$BRANCH" '
+                  [.workflow_runs[] | select(.event == "workflow_dispatch" and .head_sha == $head and .head_branch == $branch)]
+                  | sort_by(.created_at) | last // empty
+                  | [.id, .status, (.conclusion // ""), .html_url] | @tsv' <<< "$runs") \
+                || fail "GitHub did not answer with the runs of the required-check workflow $w"
+              if [[ -n "$run" ]]; then
+                IFS=$'\t' read -r id status conclusion url <<< "$run"
+                if [[ "$status" == completed ]]; then break; fi
+              fi
+              if (( SECONDS >= deadline )); then break; fi
+              sleep 15
+            done
+            if [[ -z "$run" ]]; then
+              echo "::warning title=Record::no workflow_dispatch run of $w on $short, so no status is posted for its checks"
+              continue
+            fi
+            [[ "$id" =~ ^[0-9]+$ ]] || fail "GitHub gave no run id for the dispatched run of $w"
+            if [[ "$status" != completed ]]; then
+              echo "::warning title=Record::the dispatched run $id of $w on $short is $status, so no status is posted yet. Run this again when it finishes"
+              continue
+            fi
+            case "$conclusion" in
+              success | failure | timed_out) ;;
+              *)
+                echo "::warning title=Record::the dispatched run $id of $w on $short ended $conclusion and made no check, so no status is posted for it"
+                continue
+                ;;
+            esac
+            jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" --jq '.jobs[] | [.name, (.conclusion // "")] | @tsv') \
+              || fail "could not read the jobs of run $id of $w"
+            if [[ -z "$jobs" ]]; then
+              fail "run $id of $w shows no jobs, so there is no check to report"
+            fi
+            while IFS=$'\t' read -r name result; do
+              case "$result" in
+                success) state=success ;;
+                failure | timed_out) state=failure ;;
+                skipped | neutral) echo "The job $name of run $id was $result: no status posted."; continue ;;
+                *) state=error ;;
+              esac
+              [[ -n "$name" ]] || fail "a job of run $id has no name"
+              description="workflow_dispatch run $id on $short"
+              # The newest status of this name on the head; the same state for the same run is not posted again.
+              last=$(gh api "repos/$GITHUB_REPOSITORY/commits/$head/statuses?per_page=100" \
+                | jq -r --arg ctx "$name" '[.[] | select(.context == $ctx)] | first // empty | [.state, .target_url] | @tsv') \
+                || fail "could not read the statuses of ${short}"
+              if [[ "$last" == "$(printf '%s\t%s' "$state" "$url")" ]]; then
+                echo "$name is already $state on $short for run $id."
+                continue
+              fi
+              gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$head" \
+                -f state="$state" -f context="$name" -f target_url="$url" -f description="$description" > /dev/null \
+                || fail "could not post the status $name on $short"
+              echo "Posted $name = $state on $short for run $id."
+            done <<< "$jobs"
           done
 
       - name: Write the record into the PR body

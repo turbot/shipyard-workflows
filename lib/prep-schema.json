@@ -125,15 +125,20 @@
           "$ref": "#/$defs/text"
         },
         "changes": {
-          "description": "What changes for users, and what proves each change.",
+          "description": "What changes for users, the PRs each change is about, and what proves it.",
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["change", "proof"],
+            "required": ["change", "proof", "covers"],
             "additionalProperties": false,
             "properties": {
               "change": { "$ref": "#/$defs/text" },
-              "proof": { "$ref": "#/$defs/text" }
+              "proof": { "$ref": "#/$defs/text" },
+              "covers": {
+                "description": "The PRs in the range this change is about. The release PR shows them beside the change; a PR a user can see that no change covers gets a row that says no proof was given.",
+                "$ref": "#/$defs/prList",
+                "minItems": 1
+              }
             }
           }
         },
