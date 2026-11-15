@@ -100,7 +100,7 @@ jobs:
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
       statuses: write        # read its commit statuses, and post the dispatched runs' results as statuses on the evidence commit
-      actions: write         # download the results artifact; run the required-check workflows
+      actions: write         # download the results artifact; run the required-check workflows; read the event of each check run's workflow run
       id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
     env:
       PR: ${{ inputs.pr }}
@@ -475,6 +475,7 @@ jobs:
       pull-requests: write   # write the record into the PR body
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
+      actions: read          # the event of each check run's workflow run (a Dependabot or scheduled run is not judged)
       statuses: read         # and its commit statuses
       id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
     env:
