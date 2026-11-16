@@ -12,10 +12,13 @@
 #   2. check the prep file against those facts (`shipyard lint-prep`), so a prep file made for
 #      another commit, or one that fails the lint, never gets further;
 #   3. cut (`shipyard cut`): the branch, the CHANGELOG section and the notes, the artifact;
-#   4. push the branch with the caller's token (`shipyard push`), and check the remote holds it;
+#   4. push the branch with the caller's token (`shipyard push`), and check the remote holds it: a cut
+#      must be in the history of the commit the run started from, a re-ship in the base's;
 #   5. upload the artifact: the files `branch`, `sha`, `title` and `body.md`.
 # A re-ship (input `reship`) skips the prep file and the facts: the cut reads the version's own files
 # at the commit, checks its release PR merged and its ship run failed, and makes the branch again.
+# It is started on the working branch like any cut (that is where the newest caller is, and where the
+# fleet's hook opens the PR from); its commit is the tip of the base the version merged into.
 #
 # Nothing from the caller's inputs goes into a shell line: each reaches a step as an environment
 # variable and is checked there. The caller's code is never run with the token in its environment.
@@ -26,7 +29,7 @@ on:
   workflow_call:
     inputs:
       commit:
-        description: The full 40-character commit the prep job read. The facts end here; the release is cut from it, and it must be in the history of the commit this run started from.
+        description: The full 40-character commit the prep job read. The facts end here; the release is cut from it, and it must be in the history of the commit this run started from (a re-ship's is the tip of its base, see reship).
         type: string
         required: true
       prep-run:
@@ -55,7 +58,7 @@ on:
         required: false
         default: CHANGELOG.md
       reship:
-        description: A re-ship (docs/release-cut.md) - the version whose release PR merged and whose ship run failed. The cut makes release/<version> again from the commit, which must be the tip of the branch the version merged into; no prep file is read. Leave out prep-run and prep-file.
+        description: A re-ship (docs/release-cut.md) - the version whose release PR merged and whose ship run failed. Start the run on the working branch. The cut makes release/<version> again from the commit, which must be the tip of the branch the version merged into; no prep file is read. Leave out prep-run and prep-file.
         type: string
         required: false
         default: ''
@@ -141,7 +144,8 @@ jobs:
           persist-credentials: false
 
       # The prep job's commit, with every tag and branch: the facts read the tags, the cut looks at
-      # the remote branches, and the push checks the commit is in the history of this run's own.
+      # the remote branches, and the push checks the commit is in the history of this run's own
+      # (a re-ship's: of the base's).
       # No credentials stay in the checkout: the facts' detector is the repo's own code.
       - name: Check out the repo at the prep job's commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -215,13 +219,23 @@ jobs:
             --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" "${work[@]}"
 
       # The only step that pushes. It checks the artifact's files agree with the branch's tip and that
-      # the commit the facts read is in the history of the commit this run started from.
+      # the commit the facts read is in the history of the commit this run started from (a re-ship's cut
+      # commit: of origin/<base>).
       - name: Push the release branch
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           branch=$(cat "$RUNNER_TEMP/release/release-pr/branch")
+          if [[ -n "$RESHIP" ]]; then
+            # A re-ship is cut from the tip of the base the version merged into, which is not in the
+            # working branch's history (the failed ship made no tag, so nothing merged back). Its
+            # own cut has checked the commit is that tip: the push checks it is in the base.
+            base=$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).base))' "$RUNNER_TEMP/release/release-pr/release-pr.json")
+            [[ "$base" =~ ^[A-Za-z0-9._/-]+$ && "$base" != -* ]] || { echo "::error title=Cut::the artifact's base is not a branch name"; exit 2; }
+            node shipyard/bin/shipyard push --dir caller --branch "$branch" --artifact "$RUNNER_TEMP/release/release-pr" --within "origin/$base"
+            exit 0
+          fi
           node shipyard/bin/shipyard push --dir caller --branch "$branch" --artifact "$RUNNER_TEMP/release/release-pr" --within "$GITHUB_SHA"
 
       # The four files the hook reads, and no others.
