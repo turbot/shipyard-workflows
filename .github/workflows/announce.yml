@@ -1,0 +1,136 @@
+# What follows a release tag: the changelog page on the product's site repo (merged by the release
+# bot), the #releases line for a product with no page, and a "Live in" comment on each issue the
+# release closes. docs/release-announce.md says how a repo calls it.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
+# commit, from a `push` of tags (the release App's tag starts it) or by hand with the tag to run again.
+#
+# Nothing here checks out the caller's repo or runs its code: GitHub is asked for the tag, the
+# release PR, the notes and the facts, and their text is data. The page token and the Slack token
+# are each in the environment of one step alone, and a step that fails never stops the next:
+# an output that fails files a Bug in the caller's repo and the job goes on, so the release is
+# never failed by what follows it.
+
+name: Announce
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'The release tag to announce, such as v1.5.0. From a push of tags it is github.ref_name; by hand it is the tag to run again.'
+        type: string
+        required: true
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        default: v
+      automation-logins:
+        description: 'The accounts that open release PRs, comma-separated. Required: a merged release/ PR from any other account is never announced.'
+        type: string
+        required: true
+      page-targets:
+        description: 'Where a page may go, comma-separated <owner>/<name>:<folder>/ entries, such as example-org/example-site:content/changelog/. A page for another repo, or outside the folder, is refused, whatever .github/release.json says.'
+        type: string
+        default: ''
+      slack-channel:
+        description: The channel the #releases line is posted in.
+        type: string
+        default: '#releases'
+    secrets:
+      page-token:
+        description: The release bot's token for the site repo (contents and pull requests write). Only the page step sees it.
+        required: false
+      slack-token:
+        description: The release bot's Slack token (chat:write). Only the post step sees it.
+        required: false
+
+permissions: {}
+
+# One run at a time for each repo and tag, so a run started by hand while the tag's own run is still
+# going waits for it and then finds its work done, never posting or opening a page twice. A waiting
+# run replaced by a newer one for the same tag loses nothing: both do the same work.
+concurrency:
+  group: announce-${{ github.repository }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  announce:
+    name: announce
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read        # the release notes, the facts and the config at the merge commit
+      pull-requests: read   # the release PR
+      issues: write         # "Live in" comments, the note that the line was posted, and the Bug
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      TAG_PREFIX: ${{ inputs.tag-prefix }}
+      AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+      PAGE_TARGETS: ${{ inputs.page-targets }}
+      SLACK_CHANNEL: ${{ inputs.slack-channel }}
+    steps:
+      - name: Find this workflow's commit
+        # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+        # workflow, which is the commit of shipyard to run.
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/announce.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows announce.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Announce::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        id: shipyard
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # Inputs reach the command as environment, never as shell text.
+      - name: Make the changelog page
+        shell: bash
+        env:
+          PAGE_TOKEN: ${{ secrets.page-token }}
+        run: |
+          [ -n "${AUTOMATION_LOGINS//[[:space:],]/}" ] || { echo "::error::automation-logins names no account: name the accounts that open release PRs"; exit 1; }
+          node shipyard/bin/shipyard announce --output page --tag "$TAG" --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --page-targets "$PAGE_TARGETS"
+
+      - name: Post the #releases line
+        if: ${{ !cancelled() && steps.shipyard.outcome == 'success' }}
+        shell: bash
+        env:
+          SLACK_TOKEN: ${{ secrets.slack-token }}
+        run: |
+          [ -n "${AUTOMATION_LOGINS//[[:space:],]/}" ] || { echo "::error::automation-logins names no account: name the accounts that open release PRs"; exit 1; }
+          node shipyard/bin/shipyard announce --output post --tag "$TAG" --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --slack-channel "$SLACK_CHANNEL"
+
+      - name: Comment Live in on the closed issues
+        if: ${{ !cancelled() && steps.shipyard.outcome == 'success' }}
+        shell: bash
+        run: |
+          [ -n "${AUTOMATION_LOGINS//[[:space:],]/}" ] || { echo "::error::automation-logins names no account: name the accounts that open release PRs"; exit 1; }
+          node shipyard/bin/shipyard announce --output comments --tag "$TAG" --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS"

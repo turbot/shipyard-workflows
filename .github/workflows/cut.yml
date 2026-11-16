@@ -14,6 +14,8 @@
 #   3. cut (`shipyard cut`): the branch, the CHANGELOG section and the notes, the artifact;
 #   4. push the branch with the caller's token (`shipyard push`), and check the remote holds it;
 #   5. upload the artifact: the files `branch`, `sha`, `title` and `body.md`.
+# A re-ship (input `reship`) skips the prep file and the facts: the cut reads the version's own files
+# at the commit, checks its release PR merged and its ship run failed, and makes the branch again.
 #
 # Nothing from the caller's inputs goes into a shell line: each reaches a step as an environment
 # variable and is checked there. The caller's code is never run with the token in its environment.
@@ -52,6 +54,11 @@ on:
         type: string
         required: false
         default: CHANGELOG.md
+      reship:
+        description: A re-ship (docs/release-cut.md) - the version whose release PR merged and whose ship run failed. The cut makes release/<version> again from the commit, which must be the tip of the branch the version merged into; no prep file is read. Leave out prep-run and prep-file.
+        type: string
+        required: false
+        default: ''
 
 permissions: {}
 
@@ -76,14 +83,20 @@ jobs:
       TAG_PREFIX: ${{ inputs.tag-prefix }}
       BASE: ${{ inputs.base }}
       CHANGELOG: ${{ inputs.changelog }}
+      RESHIP: ${{ inputs.reship }}
     steps:
       - name: Check the inputs
         shell: bash
         run: |
           fail() { echo "::error title=Cut::$1"; exit 2; }
           [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail 'commit must be a full 40-character commit id'
-          if [[ -n "$PREP_RUN" && -n "$PREP_FILE" ]]; then fail 'name the prep file once: prep-run or prep-file, not both'; fi
-          if [[ -z "$PREP_RUN" && -z "$PREP_FILE" ]]; then fail 'name the prep file: prep-run (the prep job'"'"'s run) or prep-file (a path in the repo)'; fi
+          if [[ -n "$RESHIP" ]]; then
+            [[ "$RESHIP" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail 'reship must be a version, X.Y.Z'
+            if [[ -n "$PREP_RUN" || -n "$PREP_FILE" ]]; then fail 'a re-ship reads no prep file: leave out prep-run and prep-file'; fi
+          else
+            if [[ -n "$PREP_RUN" && -n "$PREP_FILE" ]]; then fail 'name the prep file once: prep-run or prep-file, not both'; fi
+            if [[ -z "$PREP_RUN" && -z "$PREP_FILE" ]]; then fail 'name the prep file: prep-run (the prep job'"'"'s run) or prep-file (a path in the repo)'; fi
+          fi
           if [[ -n "$PREP_RUN" && ! "$PREP_RUN" =~ ^[0-9]+$ ]]; then fail 'prep-run must be a run id (digits)'; fi
           if [[ "$PREP_FILE" == -* || "$PREP_FILE" == *..* ]]; then fail 'prep-file must be a path inside the repo'; fi
           [[ "$TAG_PREFIX" =~ ^[A-Za-z0-9._-]*$ ]] || fail 'tag-prefix may hold only letters, digits, dot, underscore and hyphen'
@@ -147,6 +160,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$RUNNER_TEMP/release"
+          if [[ -n "$RESHIP" ]]; then echo 'A re-ship reads no prep file.'; exit 0; fi
           if [[ -n "$PREP_RUN" ]]; then
             conclusion=$(gh run view "$PREP_RUN" --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)
             if [[ "$conclusion" != "success" ]]; then
@@ -165,12 +179,16 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: node shipyard/bin/shipyard facts --repo "$GITHUB_REPOSITORY" --to "$COMMIT" --tag-prefix "$TAG_PREFIX" --dir caller --out "$RUNNER_TEMP/release/facts.json"
+        run: |
+          if [[ -n "$RESHIP" ]]; then echo 'A re-ship makes no facts: the cut reads the version'"'"'s own.'; exit 0; fi
+          node shipyard/bin/shipyard facts --repo "$GITHUB_REPOSITORY" --to "$COMMIT" --tag-prefix "$TAG_PREFIX" --dir caller --out "$RUNNER_TEMP/release/facts.json"
 
       # Refuses a prep file made for another range, and one that fails the lint: the job stops here.
       - name: Check the prep file against the facts
         shell: bash
-        run: node shipyard/bin/shipyard lint-prep "$RUNNER_TEMP/release/prep.json" --facts "$RUNNER_TEMP/release/facts.json"
+        run: |
+          if [[ -n "$RESHIP" ]]; then echo 'A re-ship has no prep file to check.'; exit 0; fi
+          node shipyard/bin/shipyard lint-prep "$RUNNER_TEMP/release/prep.json" --facts "$RUNNER_TEMP/release/facts.json"
 
       - name: Cut the release
         shell: bash
@@ -185,6 +203,13 @@ jobs:
           # records it, and the merge-back after the tag reads it. A run on a tag records none.
           work=()
           if [ "$GITHUB_REF_TYPE" = "branch" ]; then work=(--work-branch "$GITHUB_REF_NAME"); fi
+          if [[ -n "$RESHIP" ]]; then
+            # A re-ship: the version that merged, cut again from the commit with the files it left
+            # there, and the work branch its first cut recorded.
+            node shipyard/bin/shipyard cut --reship "$RESHIP" --tag-prefix "$TAG_PREFIX" --repo "$GITHUB_REPOSITORY" \
+              --dir caller --out "$RUNNER_TEMP/release/release-pr" --changelog "$CHANGELOG"
+            exit 0
+          fi
           node shipyard/bin/shipyard cut \
             --facts "$RUNNER_TEMP/release/facts.json" --prep "$RUNNER_TEMP/release/prep.json" \
             --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" "${work[@]}"

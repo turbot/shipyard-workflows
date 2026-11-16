@@ -21,7 +21,7 @@
 # (`shipyard record`); push the evidence commit with the caller's token (`shipyard push`); wait
 # for GitHub to show the pushed commit as the PR's head; run the caller's required-check workflows
 # on it; wait for the other checks; report each dispatched run's jobs as commit statuses on the
-# pushed commit; write the body (`shipyard record --update`).
+# pushed commit; delete the held runs that stand behind a finished run; write the body (`shipyard record --update`).
 # A push made with the job's own token starts no workflow that runs (GitHub holds its `pull_request`
 # runs for a person's approval), so this does not call itself, and the
 # checks the base branch's rules require would never run on the evidence commit. A
@@ -30,7 +30,9 @@
 # GitHub does not count a `workflow_dispatch` run's checks for a required check of a ruleset, so
 # the job also posts each finished dispatched run's jobs as commit statuses on the pushed commit,
 # named as the checks are: a status reports a real run of the repo's tests on that exact commit,
-# and nothing is approved by hand. The held `pull_request` runs stay held and are never approved.
+# and nothing is approved by hand. The held `pull_request` runs are never approved: the job deletes the
+# ones of the workflows it ran, and of any workflow that finished on the build's source commit (the
+# approver sees no run awaiting approval), and leaves the rest.
 
 name: Record a release
 
@@ -443,6 +445,104 @@ jobs:
               echo "Posted $name = $state on $short for run $id."
             done <<< "$jobs"
           done
+
+      # The push of the evidence made `pull_request` runs that GitHub holds for a person's approval
+      # ("awaiting approval from someone with write access"). The dispatched runs above did the work
+      # and their jobs are statuses now, and the evidence commit changes only the release notes, the
+      # changelog and the evidence, so a held run adds nothing but a button on the page the approver
+      # judges, and a red run in the history when the PR merges. So each held run at this head, made
+      # by the push (`github-actions[bot]`), is deleted when either
+      #   1. its workflow is listed and has a dispatched run on this branch at this head that
+      #      finished with a result (the runs the statuses above were posted for), or
+      #   2. the same workflow's `pull_request` run finished with a result on the build's source
+      #      commit (the head before the evidence push), on this branch. A run of this very record
+      #      counts: the caller's own workflow is in progress while it clears its own held run.
+      # Rule 2 reaches workflows the record did not run (a plan, the caller's own). A held run that
+      # neither rule covers, or one a person made, stays: it may be the only sign that the workflow
+      # exists. The step runs only for a repo that lists required-check-workflows: a repo that lists
+      # none gets no statuses, so its held runs are the only way its checks run (a person approves
+      # them), and deleting them would leave its required checks missing for good. Clearing is
+      # tidying: a run that cannot be read or deleted is a warning, never a failed record.
+      - name: Clear the held runs of the checks the record ran
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.pr.outputs.branch }}
+        run: |
+          warn() { echo "::warning title=Record::$1"; }
+          IFS=$', \t' read -ra listed <<< "$(printf '%s' "$CHECK_WORKFLOWS" | tr '\n' ',')"
+          workflows=()
+          for w in "${listed[@]}"; do
+            if [[ -n "$w" && " ${workflows[*]} " != *" $w "* ]]; then workflows+=("$w"); fi
+          done
+          if (( ${#workflows[@]} == 0 )); then
+            echo 'No required-check-workflows listed: no held run to clear.'
+            exit 0
+          fi
+          head=$(git -C caller rev-parse HEAD)
+          short=${head:0:7}
+          # The build's source: the head before the evidence push. Rule 2 needs it, and needs it to be in
+          # this commit's history (only that is checked here: that nothing but the notes, changelog and
+          # evidence changed since is the Same build row's judgement, and a record that fails it is HOLD).
+          source=$(jq -r '.build.source // empty' "$RUNNER_TEMP/results/results.json" 2> /dev/null) || source=
+          if [[ ! "$source" =~ ^[0-9a-f]{40}$ ]]; then
+            warn "could not read the build's source, so a held run is cleared only for a workflow the record ran"
+            source=
+          elif ! git -C caller merge-base --is-ancestor "$source" "$head" 2> /dev/null; then
+            warn "the build's source ${source:0:7} is not in the history of $short, so a held run is cleared only for a workflow the record ran"
+            source=
+          fi
+          # Every held run the push made at the head, as "<id><TAB><workflow file>".
+          held=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$head&event=pull_request&status=action_required&per_page=100" 2> /dev/null \
+            | jq -r --arg head "$head" '.workflow_runs[] | select(.head_sha == $head and .event == "pull_request" and .conclusion == "action_required" and .triggering_actor.login == "github-actions[bot]") | [(.id | tostring), ((.path // "") | sub("@.*$"; "") | split("/") | last)] | @tsv' 2> /dev/null) || held=ERROR
+          if [[ "$held" == ERROR ]]; then
+            warn "could not read the held runs on $short, so none is cleared"
+            exit 0
+          fi
+          while IFS= read -r w; do
+            [[ -n "$w" ]] || continue
+            if [[ ! "$w" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]]; then
+              warn "a held run on $short has no usable workflow file ($w): left"
+              continue
+            fi
+            why=
+            # Rule 1: the record ran this workflow itself on this branch at this head, and it finished.
+            if [[ " ${workflows[*]} " == *" $w "* ]]; then
+              ran=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$w/runs?head_sha=$head&event=workflow_dispatch&per_page=100" 2> /dev/null \
+                | jq -r --arg head "$head" --arg branch "$BRANCH" '[.workflow_runs[] | select(.head_sha == $head and .head_branch == $branch and .status == "completed" and (.conclusion | IN("success", "failure", "timed_out")))] | length' 2> /dev/null) || ran=
+              if [[ ! "$ran" =~ ^[0-9]+$ ]]; then
+                warn "could not read the dispatched runs of $w on $short, so its held runs are left"
+                continue
+              fi
+              if (( ran > 0 )); then why="the dispatched run's checks are posted as statuses"; fi
+            fi
+            # Rule 2: the workflow finished on the build's source (or is this run), and the evidence commit adds no code.
+            if [[ -z "$why" && -n "$source" ]]; then
+              onsrc=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$w/runs?head_sha=$source&event=pull_request&per_page=100" 2> /dev/null \
+                | jq -r --arg src "$source" --arg branch "$BRANCH" --arg this "${GITHUB_RUN_ID:-}" '[.workflow_runs[] | select(.head_sha == $src and .head_branch == $branch and .event == "pull_request" and ((.status == "completed" and (.conclusion | IN("success", "failure", "timed_out"))) or ((.id | tostring) == $this)))] | length' 2> /dev/null) || onsrc=
+              if [[ ! "$onsrc" =~ ^[0-9]+$ ]]; then
+                warn "could not read the runs of $w on the build's source ${source:0:7}, so its held runs are left"
+                continue
+              fi
+              if (( onsrc > 0 )); then why="$w finished on the build's source ${source:0:7} and the evidence commit changes only the notes, changelog and evidence"; fi
+            fi
+            if [[ -z "$why" ]]; then
+              echo "$w has no finished run on $short from the record, nor on the build's source: its held runs are left."
+              continue
+            fi
+            while IFS=$'\t' read -r id file; do
+              [[ "$file" == "$w" ]] || continue
+              if [[ ! "$id" =~ ^[0-9]+$ ]]; then
+                warn "a held run of $w on $short has no usable id: left"
+                continue
+              fi
+              if err=$(gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/runs/$id" 2>&1 > /dev/null); then
+                echo "Deleted the held run $id of $w on $short: $why."
+              else
+                warn "could not delete the held run $id of $w on $short: ${err:0:200}"
+              fi
+            done <<< "$held"
+          done < <(cut -f2 <<< "$held" | sort -u)
 
       - name: Write the record into the PR body
         shell: bash
