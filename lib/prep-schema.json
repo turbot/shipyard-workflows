@@ -115,25 +115,39 @@
       }
     },
     "report": {
-      "description": "The report's words: the top block of the release PR. Together they are 300 words or fewer.",
+      "description": "The report's words. The approver's part (each change with its before and after, safety, the risks and the internal lines) tops the release PR; the proof, what was not tested and the notes for the release manager are folded below it. Together they are 300 words or fewer.",
       "type": "object",
-      "required": ["summary", "changes", "risks", "untested"],
+      "required": ["summary", "changes", "safety", "risks", "internal", "untested", "managerNotes"],
       "additionalProperties": false,
       "properties": {
         "summary": {
-          "description": "What this release is, in a sentence or two.",
+          "description": "What this release is, in a sentence or two. It heads the folded proof.",
           "$ref": "#/$defs/text"
         },
         "changes": {
-          "description": "What changes for users, the PRs each change is about, and what proves it.",
+          "description": "What changes for users: a short name for each change, what a person had before and has after it, what proves it, and the PRs it is about.",
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["change", "proof", "covers"],
+            "required": ["change", "before", "after", "proof", "covers"],
             "additionalProperties": false,
             "properties": {
-              "change": { "$ref": "#/$defs/text" },
-              "proof": { "$ref": "#/$defs/text" },
+              "change": {
+                "description": "A short name for the change, a few words: its heading in the approver's part.",
+                "$ref": "#/$defs/text"
+              },
+              "before": {
+                "description": "What a person saw or had before this release, in plain words.",
+                "$ref": "#/$defs/text"
+              },
+              "after": {
+                "description": "What a person sees or has after it, in plain words.",
+                "$ref": "#/$defs/text"
+              },
+              "proof": {
+                "description": "What proves the change: a test by name, a check that ran, a number. Folded below the approver's part.",
+                "$ref": "#/$defs/text"
+              },
               "covers": {
                 "description": "The PRs in the range this change is about. The release PR shows them beside the change; a PR a user can see that no change covers gets a row that says no proof was given.",
                 "$ref": "#/$defs/prList",
@@ -142,8 +156,12 @@
             }
           }
         },
+        "safety": {
+          "description": "Could this release break something? The answer for the approver: no and why not, or what to watch.",
+          "$ref": "#/$defs/text"
+        },
         "risks": {
-          "description": "The risks, and how to undo each one.",
+          "description": "Each risk to users or production, and what we do if it happens. A note about running the release goes in managerNotes.",
           "type": "array",
           "items": {
             "type": "object",
@@ -155,8 +173,33 @@
             }
           }
         },
+        "internal": {
+          "description": "A plain line for each change users do not see, and the PRs it is about. Every PR grouped Internal is in some line's covers.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["text", "covers"],
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "description": "The change in a few plain words, never the PR's title.",
+                "$ref": "#/$defs/text"
+              },
+              "covers": {
+                "description": "The PRs in the range this line is about.",
+                "$ref": "#/$defs/prList",
+                "minItems": 1
+              }
+            }
+          }
+        },
         "untested": {
           "description": "What was not tested.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/text" }
+        },
+        "managerNotes": {
+          "description": "Notes for the person running the release (a paused run to approve, a step to run again), folded under For the release manager.",
           "type": "array",
           "items": { "$ref": "#/$defs/text" }
         }
