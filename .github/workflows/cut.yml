@@ -16,7 +16,8 @@
 #      must be in the history of the commit the run started from, a re-ship in the base's;
 #   5. upload the artifact: the files `branch`, `sha`, `title` and `body.md`.
 # A re-ship (input `reship`) skips the prep file and the facts: the cut reads the version's own files
-# at the commit, checks its release PR merged and its ship run failed, and makes the branch again.
+# at the commit, checks its release PR merged and its ship run failed, and makes the branch again. Its
+# input `fixes` names commits of the working branch, which the cut cherry-picks onto the branch.
 # It is started on the working branch like any cut (that is where the newest caller is, and where the
 # fleet's hook opens the PR from); its commit is the tip of the base the version merged into.
 #
@@ -62,6 +63,11 @@ on:
         type: string
         required: false
         default: ''
+      fixes:
+        description: Only with reship. The fix commits of the working branch (the merge commits of PRs already merged and reviewed there), full 40-character commit ids separated by spaces. The cut cherry-picks them, in the order given, onto release/<version> after the re-ship commit, so the release PR holds the fix with no PR into the release branch. A commit that is not on the working branch, did not come from a merged PR, or does not apply stops the cut before anything is pushed.
+        type: string
+        required: false
+        default: ''
 
 permissions: {}
 
@@ -87,6 +93,7 @@ jobs:
       BASE: ${{ inputs.base }}
       CHANGELOG: ${{ inputs.changelog }}
       RESHIP: ${{ inputs.reship }}
+      FIXES: ${{ inputs.fixes }}
     steps:
       - name: Check the inputs
         shell: bash
@@ -99,6 +106,11 @@ jobs:
           else
             if [[ -n "$PREP_RUN" && -n "$PREP_FILE" ]]; then fail 'name the prep file once: prep-run or prep-file, not both'; fi
             if [[ -z "$PREP_RUN" && -z "$PREP_FILE" ]]; then fail 'name the prep file: prep-run (the prep job'"'"'s run) or prep-file (a path in the repo)'; fi
+          fi
+          if [[ -n "$FIXES" ]]; then
+            [[ -n "$RESHIP" ]] || fail 'fixes goes with reship: a cut takes no cherry-picks'
+            [[ "$GITHUB_REF_TYPE" = "branch" ]] || fail 'fixes are commits of the working branch: start the re-ship on it, not on a tag'
+            [[ "$FIXES" =~ ^[0-9a-f]{40}([[:space:]]+[0-9a-f]{40})*[[:space:]]*$ ]] || fail 'fixes must be full 40-character commit ids separated by spaces'
           fi
           if [[ -n "$PREP_RUN" && ! "$PREP_RUN" =~ ^[0-9]+$ ]]; then fail 'prep-run must be a run id (digits)'; fi
           if [[ "$PREP_FILE" == -* || "$PREP_FILE" == *..* ]]; then fail 'prep-file must be a path inside the repo'; fi
@@ -210,8 +222,12 @@ jobs:
           if [[ -n "$RESHIP" ]]; then
             # A re-ship: the version that merged, cut again from the commit with the files it left
             # there, and the work branch its first cut recorded.
+            # `fixes` are commits of the working branch this run started on, cherry-picked after the re-ship
+            # commit; the cut checks each and stops before anything is pushed when one fails.
+            fixes=()
+            if [[ -n "$FIXES" ]]; then fixes=(--fixes "$FIXES"); fi
             node shipyard/bin/shipyard cut --reship "$RESHIP" --tag-prefix "$TAG_PREFIX" --repo "$GITHUB_REPOSITORY" \
-              --dir caller --out "$RUNNER_TEMP/release/release-pr" --changelog "$CHANGELOG"
+              --dir caller --out "$RUNNER_TEMP/release/release-pr" --changelog "$CHANGELOG" "${work[@]}" "${fixes[@]}"
             exit 0
           fi
           node shipyard/bin/shipyard cut \

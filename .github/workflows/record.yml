@@ -223,7 +223,7 @@ jobs:
           args=()
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
-          node shipyard/bin/shipyard record --from-candidate --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
+          node shipyard/bin/shipyard record --from-candidate --release-run "$RESULTS_RUN" --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
 
       - name: Push the evidence
@@ -553,7 +553,7 @@ jobs:
           args=()
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
-          node shipyard/bin/shipyard record --from-candidate --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
+          node shipyard/bin/shipyard record --from-candidate --release-run "$RESULTS_RUN" --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
 
   # A review: the same record, read again from what the candidate already holds. No evidence is

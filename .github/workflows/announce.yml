@@ -61,8 +61,10 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read        # the release notes, the facts and the config at the merge commit
-      pull-requests: read   # the release PR
-      issues: write         # "Live in" comments, the note that the line was posted, and the Bug
+      # The note that the line was posted is a comment on the release PR. GitHub allows a comment on a
+      # pull request only with pull-requests write, whatever issues: write says: with read it answers 403.
+      pull-requests: write  # the release PR, and the note on it that the line was posted
+      issues: write         # "Live in" comments, and the Bug
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
     env:
       GITHUB_TOKEN: ${{ github.token }}
