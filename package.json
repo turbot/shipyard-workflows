@@ -1,6 +1,6 @@
 {
   "name": "shipyard",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "description": "Release tooling every Turbot repo calls: reusable workflows and the CLI they run.",
   "license": "Apache-2.0",

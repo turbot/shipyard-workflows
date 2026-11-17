@@ -1,6 +1,7 @@
 # What follows a release tag: the changelog page on the product's site repo (merged by the release
 # bot), the #releases line for a product with no page, and a "Live in" comment on each issue the
-# release closes. docs/release-announce.md says how a repo calls it.
+# release closes, then closes the caller's open prep jobs the release shipped (a failure there is a
+# warning, never a failed run; no permission beyond the issues: write below). docs/release-announce.md says how a repo calls it.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at

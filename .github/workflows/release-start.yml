@@ -1,25 +1,13 @@
-# Starts a release of a product repo, or watches the prep jobs for timeouts.
+# Starts a release of a product repo.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows. The control repo calls that copy at
 # `v<major>` (`v0`), the tag each release moves to its own commit, from a schedule (daily, weekly), from a `release:now` PR event and by hand. The
 # caller is the repo the prep jobs are filed in; it holds the family files and the tokens.
 #
-#   inputs.repo     the product repo, `<owner>/<name>` (leave out when `watch` is true)
+#   inputs.repo     the product repo, `<owner>/<name>`
 #   one of          `cadence` (daily or weekly), `branch` (by hand) or `pr` (a release:now PR)
 #   inputs.wait     with `pr`, minutes to wait for the full check on its merge commit (at most 180)
-#   inputs.watch    run `shipyard start-watch` (the timeouts) and the reminder instead of a start
-#
-# A watch run has two jobs. `start` runs the timeouts, with the caller's own tokens. `remind` sends the
-# one reminder of the Slack ask (docs/release-ask.md): an open release PR asked about 4 or more hours ago
-# with no approval at its head gets one reply in the ask's thread. It runs in the caller's `slack`
-# environment (default branch only), which holds the approver list (the Slack token is an org secret
-# the caller passes by name), and holds no product or jobs token: it reads the caller's own release PR and marks the note on it
-# with the job's own token. The note is a comment on a pull request, which GitHub allows only with
-# `pull-requests: write` (`issues: write` and `pull-requests: read` answer 403), so the job asks for it, and
-# GitHub checks every job of a called workflow against the caller's grant, a skipped one too: a caller grants
-# `pull-requests: write` on every job that calls this workflow, the daily start as well as the watch.
-# It rides on the watch's schedule, and adds none.
 #
 # Nothing a caller passes is put into a shell line: every input goes through an environment
 # variable and is quoted there. See docs/release-start.md.
@@ -49,18 +37,6 @@ on:
         description: With pr, how many minutes (at most 180) to wait for the repo's full check
         type: string
         default: ''
-      watch:
-        description: Run the timeouts of the open prep jobs, and the ask's reminder, instead of a start
-        type: boolean
-        default: false
-      fleet-logins:
-        description: With watch, the reminder's comma-separated logins that are the fleet and never count as an independent approval, besides every bot account. The same as the record workflow's.
-        type: string
-        default: ''
-      armed-label:
-        description: With watch, the reminder's label whose author counts as having driven a change. The same as the record workflow's.
-        type: string
-        default: agent:ready
     secrets:
       product_token:
         description: Reads the product repo and comments on its release PR. The workflow's own token when left out.
@@ -68,16 +44,13 @@ on:
       jobs_token:
         description: Writes issues in the repo that calls this. The workflow's own token when left out.
         required: false
-      SHIPYARD_SLACK_BOT_TOKEN:
-        description: The Slack app's bot token, passed by name as the secret of the same name (docs/release-ask.md). Its value is the org secret of that name, visible to the selected repos, and only the remind job reads it. A watch whose caller does not pass it sends no reminder.
-        required: false
 
 permissions: {}
 
 # One run at a time for each product and trigger: a daily start never queues behind a release:now
 # that is waiting for its check, and a second run of the same trigger waits its turn.
 concurrency:
-  group: release-start-${{ inputs.watch && 'watch' || format('{0}-{1}', inputs.repo, inputs.pr || inputs.branch || inputs.cadence) }}
+  group: release-start-${{ format('{0}-{1}', inputs.repo, inputs.pr || inputs.branch || inputs.cadence) }}
   cancel-in-progress: false
 
 jobs:
@@ -90,23 +63,18 @@ jobs:
       pull-requests: read  # list the open pull requests and read a release:now one, with the workflow's own token on a private product repo
       checks: read     # read the full check (develop-green) on a release:now merge commit: its check runs
       statuses: read   # ... and its commit statuses, which the same read also lists
-      issues: write    # file the prep job, and ask the approvers, in the calling repo
+      issues: write    # file the prep job in the calling repo
       id-token: write  # learn which commit of this workflow is running (job_workflow_sha)
     steps:
       - name: Check the inputs
         shell: bash
         env:
-          WATCH: ${{ inputs.watch }}
           PRODUCT: ${{ inputs.repo }}
           CADENCE: ${{ inputs.cadence }}
           BRANCH: ${{ inputs.branch }}
           PR: ${{ inputs.pr }}
           WAIT: ${{ inputs.wait }}
         run: |
-          if [ "$WATCH" = "true" ]; then
-            [ -z "$PRODUCT$CADENCE$BRANCH$PR$WAIT" ] || { echo "::error title=Release start::watch takes no repo, cadence, branch, pr or wait"; exit 2; }
-            exit 0
-          fi
           [ -n "$PRODUCT" ] || { echo "::error title=Release start::repo is required"; exit 2; }
           n=0
           for v in "$CADENCE" "$BRANCH" "$PR"; do [ -z "$v" ] || n=$((n + 1)); done
@@ -151,7 +119,6 @@ jobs:
 
       # The family files live in the calling repo, on its default branch.
       - name: Check out the family files
-        if: ${{ !inputs.watch }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: control
@@ -161,7 +128,6 @@ jobs:
 
       # The whole history and every tag: the range starts at the newest release tag.
       - name: Check out the product repo
-        if: ${{ !inputs.watch }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.repo }}
@@ -172,7 +138,6 @@ jobs:
           persist-credentials: false
 
       - name: Start the release
-        if: ${{ !inputs.watch }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.product_token || github.token }}
@@ -197,98 +162,3 @@ jobs:
             exit 0
           fi
           exit "$code"
-
-      - name: Watch the prep jobs
-        if: ${{ inputs.watch }}
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.product_token || github.token }}
-          SHIPYARD_JOBS_TOKEN: ${{ secrets.jobs_token || github.token }}
-          JOBS_REPO: ${{ github.repository }}
-        run: node shipyard/bin/shipyard start-watch --jobs-repo "$JOBS_REPO"
-
-  # The one reminder of the Slack ask, on the watch's schedule. Its own job, so the Slack token and the
-  # approver list are in the environment of this job and no other, and the `start` job's tokens are not.
-  remind:
-    name: remind
-    if: ${{ inputs.watch }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # The caller's: SHIPYARD_APPROVERS, on the default branch only (docs/release-ask.md). The token is an org secret.
-    environment: slack
-    permissions:
-      contents: read        # the facts and the prep file at the release PR's head, and .github/release.json at its base
-      pull-requests: write  # read the release PR, its reviews and its changes, and write the mark on its note that the reminder went out: a comment on a pull request needs write here (read answers 403)
-      issues: write         # who opened the issues a change closes (the grant the start job's callers already hold)
-      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
-    steps:
-      # The environment already refuses another branch; this says so in words, before anything is read.
-      - name: Check the run is on the default branch
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          default=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
-          if [[ "$GITHUB_REF" != "refs/heads/$default" ]]; then
-            echo "::error title=Reminder::the reminder runs on the default branch ($default) only, and this run is on $GITHUB_REF. Nothing was sent"
-            exit 1
-          fi
-
-      - name: Find this workflow's commit
-        id: self
-        shell: bash
-        run: |
-          node - <<'JS'
-          (async () => {
-            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
-            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
-            const res = await fetch(`${url}&audience=shipyard`, {
-              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
-              signal: AbortSignal.timeout(20000),
-            });
-            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
-            const { value } = await res.json();
-            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
-            const ref = String(claims.job_workflow_ref);
-            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/release-start.yml@')) {
-              throw new Error('this workflow must run as turbot/shipyard-workflows release-start.yml');
-            }
-            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
-            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
-          })().catch((e) => {
-            console.log(`::error title=Reminder::${e.message}`);
-            process.exit(2);
-          });
-          JS
-
-      - name: Check out shipyard at that commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: turbot/shipyard-workflows
-          ref: ${{ steps.self.outputs.sha }}
-          path: shipyard
-          persist-credentials: false
-
-      # One pass over the repo's open release PRs. The Slack token and the approver list are in this
-      # step's environment and no other's. A release PR not asked about, or asked about less than 4 hours
-      # ago, is left alone, and the list is read only when a reminder is due. Exit 1 is a refusal (a release
-      # PR that is not one `shipyard cut` opened, or is a draft): it is not a failure, and the next watch looks again.
-      - name: Remind
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          SHIPYARD_APPROVERS: ${{ vars.SHIPYARD_APPROVERS }}
-          SHIPYARD_SLACK_BOT_TOKEN: ${{ secrets.SHIPYARD_SLACK_BOT_TOKEN }}
-          FLEET_LOGINS: ${{ inputs.fleet-logins }}
-          ARMED_LABEL: ${{ inputs.armed-label }}
-        run: |
-          # The job's own comments carry the Actions bot's login, which `GET /user` cannot tell, so `--note-author` says which notes are its own.
-          args=(--all --remind --note-author 'github-actions[bot]' --armed-label "$ARMED_LABEL")
-          if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
-          rc=0
-          node shipyard/bin/shipyard ask "${args[@]}" || rc=$?
-          if [ "$rc" -eq 1 ]; then
-            echo "::notice title=Reminder::a release PR was not ready to be reminded about (see the lines above): the next watch looks again"
-            exit 0
-          fi
-          exit "$rc"

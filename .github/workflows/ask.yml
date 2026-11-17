@@ -1,7 +1,6 @@
 # Asks a release's approvers in Slack once its record is in. Each run is one short pass: it reads the
-# release PR, posts the ask when it is due, and ends. The one reminder after 4 hours with no approval is
-# not sent from here: it rides on the start watch (workflows/release-start.yml), which every area repo
-# already runs on a schedule. This workflow has no schedule of its own.
+# release PR, posts the ask when it is due, and ends. Nothing follows the ask. This workflow has no
+# schedule of its own.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at

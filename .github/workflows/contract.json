@@ -1,0 +1,140 @@
+{
+  "format": 1,
+  "workflows": {
+    "announce.yml": {
+      "inputs": [
+        "automation-logins",
+        "tag"
+      ],
+      "secrets": [],
+      "jobs": {
+        "announce": {
+          "contents": "read",
+          "id-token": "write",
+          "issues": "write",
+          "pull-requests": "write"
+        }
+      }
+    },
+    "ask.yml": {
+      "inputs": [],
+      "secrets": [],
+      "jobs": {
+        "ask": {
+          "contents": "read",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "write"
+        }
+      }
+    },
+    "changelog-line.yml": {
+      "inputs": [],
+      "secrets": [],
+      "jobs": {
+        "changelog-line": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "write"
+        }
+      }
+    },
+    "cut.yml": {
+      "inputs": [
+        "commit"
+      ],
+      "secrets": [],
+      "jobs": {
+        "cut": {
+          "actions": "read",
+          "contents": "write",
+          "id-token": "write",
+          "pull-requests": "read"
+        }
+      }
+    },
+    "prep.yml": {
+      "inputs": [
+        "prep"
+      ],
+      "secrets": [],
+      "jobs": {
+        "prep": {}
+      }
+    },
+    "record.yml": {
+      "inputs": [
+        "pr"
+      ],
+      "secrets": [],
+      "jobs": {
+        "record": {
+          "actions": "write",
+          "checks": "read",
+          "contents": "write",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "write",
+          "statuses": "write"
+        },
+        "record-review": {
+          "actions": "read",
+          "checks": "read",
+          "contents": "read",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "write",
+          "statuses": "write"
+        }
+      }
+    },
+    "release-check.yml": {
+      "inputs": [
+        "automation-logins"
+      ],
+      "secrets": [],
+      "jobs": {
+        "release-check": {
+          "contents": "read",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "read",
+          "statuses": "write"
+        }
+      }
+    },
+    "release-start.yml": {
+      "inputs": [],
+      "secrets": [],
+      "jobs": {
+        "start": {
+          "checks": "read",
+          "contents": "read",
+          "id-token": "write",
+          "issues": "write",
+          "pull-requests": "read",
+          "statuses": "read"
+        }
+      }
+    },
+    "tag.yml": {
+      "inputs": [
+        "automation-logins"
+      ],
+      "secrets": [],
+      "jobs": {
+        "shipped": {
+          "actions": "write",
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
+        "tag": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        }
+      }
+    }
+  }
+}
