@@ -2,8 +2,8 @@
 # `release-pr` artifact the fleet's release-PR hook opens the PR from.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
-# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
-# commit. See the README for the caller.
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit. See the README for the caller.
 #
 # It runs in the product repo, on its working branch, as the caller's own job: the hook takes
 # only a run of the workflow the repo's declaration names, in that repo. The steps, in order, each
@@ -64,7 +64,7 @@ on:
         required: false
         default: ''
       fixes:
-        description: Only with reship. The fix commits of the working branch (the merge commits of PRs already merged and reviewed there), full 40-character commit ids separated by spaces. The cut cherry-picks them, in the order given, onto release/<version> after the re-ship commit, so the release PR holds the fix with no PR into the release branch. A commit that is not on the working branch, did not come from a merged PR, or does not apply stops the cut before anything is pushed.
+        description: Only with reship. The fix commits of the working branch (the merge commits of PRs already merged and reviewed there), full 40-character commit ids separated by spaces. The cut cherry-picks them, in the order given, onto release/<version> after the re-ship commit, so the release PR holds the fix with no PR into the release branch. A commit that changes a file under .github/workflows/ (the job's own token cannot push one, so a person cherry-picks it onto the release branch after the cut), is not on the working branch, did not come from a merged PR, or does not apply stops the cut before anything is pushed.
         type: string
         required: false
         default: ''

@@ -3,8 +3,8 @@
 # release closes. docs/release-announce.md says how a repo calls it.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
-# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
-# commit, from a `push` of tags (the release App's tag starts it) or by hand with the tag to run again.
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit, from a `push` of tags (the release App's tag starts it) or by hand with the tag to run again.
 #
 # Nothing here checks out the caller's repo or runs its code: GitHub is asked for the tag, the
 # release PR, the notes and the facts, and their text is data. The page token and the Slack token

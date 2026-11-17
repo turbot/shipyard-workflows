@@ -1,0 +1,149 @@
+# Asks a release's approvers in Slack once its record is in. Each run is one short pass: it reads the
+# release PR, posts the ask when it is due, and ends. The one reminder after 4 hours with no approval is
+# not sent from here: it rides on the start watch (workflows/release-start.yml), which every area repo
+# already runs on a schedule. This workflow has no schedule of its own.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v0`. docs/release-ask.md has the caller, which runs from one trigger:
+#
+#   workflow_run   the repo's record workflow finished: the ask, for the release PR that run names
+#
+# It runs on the repo's default branch, and the job runs in the caller's `slack` environment, which
+# allows the default branch only. That environment holds the approver list (the variable
+# `SHIPYARD_APPROVERS`, a JSON object of GitHub login to Slack user id) and no token. The Slack bot
+# token (`SHIPYARD_SLACK_BOT_TOKEN`) is one org-level secret, visible to selected repos, which the
+# caller passes by name; the bot holds `chat:write` in a few channels only, so a leaked token posts
+# fake messages and reads nothing (docs/release-ask.md). A writer's own branch or PR cannot run this
+# job, and this job's code has been reviewed into the default branch; that keeps a branch from running
+# the ask, not from reading the org secret, so the token's narrow scope is what bounds a leak. Not the
+# `release` environment: it allows `main` only, and the ask runs before the merge.
+#
+# The job holds no GitHub token of its own making. It reads the repo's own release PR, its reviews and
+# its changes with the job's `GITHUB_TOKEN`, and writes the one note on the release PR that keeps it
+# from asking twice. Nothing is checked out from the release PR: the facts and the prep file are read
+# at the PR's head through the contents API, as data. The PR number is passed through `env:` and
+# checked, never put in a command.
+#
+# A missing or bad `SHIPYARD_APPROVERS` posts nothing and fails this run, naming the variable. It
+# never falls back to "any person's approval". The release is never blocked: this is its own workflow.
+
+name: Ask the approvers
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: The release PR's number, from the record run that just finished. Leave it empty to look at every open release PR of the repo (a record run that names none).
+        type: string
+        required: false
+        default: ''
+      fleet-logins:
+        description: Comma-separated logins that are the fleet and never count as an independent approval, besides every bot account. The same as the record workflow's.
+        type: string
+        required: false
+        default: ''
+      armed-label:
+        description: The label whose author counts as having driven a change. The same as the record workflow's.
+        type: string
+        required: false
+        default: agent:ready
+    secrets:
+      SHIPYARD_SLACK_BOT_TOKEN:
+        description: The Slack app's bot token, passed by name as the secret of the same name (docs/release-ask.md). Its value is the org secret of that name, visible to the selected repos, and only the ask job reads it. A secret the caller does not pass is empty here.
+        required: false
+
+permissions: {}
+
+jobs:
+  ask:
+    name: ask
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # One pass at a time per repo, so two passes cannot both ask. A pass that comes while one runs waits.
+    concurrency:
+      group: shipyard-ask-${{ github.repository }}
+      cancel-in-progress: false
+    # The caller's: SHIPYARD_APPROVERS, on the default branch only (docs/release-ask.md). The token is an org secret.
+    environment: slack
+    permissions:
+      contents: read        # the facts and the prep file at the PR's head, and .github/release.json at its base
+      pull-requests: write  # read the release PR, its reviews and its changes, and write the note on the release PR
+      issues: read          # who opened the issues a change closes
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    env:
+      PR: ${{ inputs.pr }}
+      FLEET_LOGINS: ${{ inputs.fleet-logins }}
+      ARMED_LABEL: ${{ inputs.armed-label }}
+    steps:
+      # The environment already refuses another branch; this says so in words, before anything is read.
+      - name: Check the run is on the default branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          default=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
+          if [[ "$GITHUB_REF" != "refs/heads/$default" ]]; then
+            echo "::error title=Ask::the ask runs on the default branch ($default) only, and this run is on $GITHUB_REF. Nothing was asked"
+            exit 1
+          fi
+          [[ -z "$PR" || "$PR" =~ ^[1-9][0-9]*$ ]] || { echo "::error title=Ask::pr must be a number, or empty"; exit 2; }
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/ask.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows ask.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Ask::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # One pass. The Slack token and the approver list are in this step's environment and no other's.
+      # Exit 1 is a refusal (the PR is still a draft, the record is not in yet, or is out of date): it is not a failure, and
+      # the next record run asks again, once `shipyard record` has run. Anything else fails the run.
+      - name: Ask
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SHIPYARD_APPROVERS: ${{ vars.SHIPYARD_APPROVERS }}
+          SHIPYARD_SLACK_BOT_TOKEN: ${{ secrets.SHIPYARD_SLACK_BOT_TOKEN }}
+        run: |
+          # The job's own comments carry the Actions bot's login, which `GET /user` cannot tell, so `--note-author` says which notes are its own.
+          args=(--note-author 'github-actions[bot]' --armed-label "$ARMED_LABEL")
+          if [[ -n "$PR" ]]; then args+=(--pr "$PR"); else args+=(--all); fi
+          if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
+          rc=0
+          node shipyard/bin/shipyard ask "${args[@]}" || rc=$?
+          if [ "$rc" -eq 1 ]; then
+            echo "::notice title=Ask::a release PR is not ready to be asked about yet (see the lines above): the next record run asks again"
+            exit 0
+          fi
+          exit "$rc"

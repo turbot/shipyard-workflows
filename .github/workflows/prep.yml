@@ -3,8 +3,8 @@
 # prep file reaches the cut with no commit to the working branch.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
-# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
-# commit. See the README for the caller.
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit. See the README for the caller.
 #
 # It runs in the product repo, the repo the cut runs in: the cut takes only a run of its own repo.
 # It checks only that the file is a JSON object, and runs none of the repo's code or Shipyard's.

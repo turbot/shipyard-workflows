@@ -5,8 +5,8 @@
 # docs/release-tag.md says which signals a repo wires up.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
-# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
-# commit. A caller runs it from one of these triggers:
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit. A caller runs it from one of these triggers:
 #
 #   a push to main or main-*   after the repo's ship job (`needs: ship`, `ship-result: ${{ needs.ship.result }}`),
 #                              or on its own for a Go library (`signal: merge`: the tag is the publish)

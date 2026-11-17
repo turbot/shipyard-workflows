@@ -2,8 +2,8 @@
 # candidate, and "Do not approve" (a HOLD) when a test, a smoke step or a check did not pass.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
-# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
-# commit. See the README for the caller.
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit. See the README for the caller.
 #
 # The caller runs it when the release PR opens and each time the PR, a review or a check changes.
 # A review is the one change that pushes nothing: the repo's `main` ruleset dismisses an approval
@@ -11,7 +11,13 @@
 # approval it came to record. With `review: true` the second job runs and the first does not. It
 # reads the evidence already committed on the candidate, the reviews and the checks, and writes the
 # body (`shipyard record --from-evidence --update`). Its token cannot push, it commits nothing, runs
-# no check again, and with no evidence at the head it writes HOLD with the reason.
+# no check again, and with no evidence at the head it writes HOLD with the reason. Its one other write
+# is the `shipyard/release` status below.
+# The release PR is a draft until the record has written a SHIP at its head, because an approval
+# before that cannot count: the evidence push dismisses it. The first pass makes the PR a draft
+# (`--draft-until-ship`), so a push to the candidate makes it one again; the pass that writes the
+# body marks it ready on SHIP and leaves it a draft on HOLD. A review run leaves it as it is. A
+# change of draft state that fails is a warning, never a failed record.
 # Each run reads GitHub as it is now and replaces the record already in the PR body, so a run
 # that comes late or twice leaves the same record. The facts and the prep file are the ones
 # `shipyard cut` committed to `releases/<tag>/` on the candidate, so the job needs only the PR's
@@ -33,6 +39,14 @@
 # and nothing is approved by hand. The held `pull_request` runs are never approved: the job deletes the
 # ones of the workflows it ran, and of any workflow that finished on the build's source commit (the
 # approver sees no run awaiting approval), and leaves the rest.
+#
+# The same step that writes the body sets one commit status, `shipyard/release`, on the PR's head (the
+# evidence commit, or the candidate when it has none), from the verdict the body shows: success for SHIP
+# with only the approval `main` requires left, pending for SHIP with a step still open (a check still
+# running, a second approver), failure for HOLD with the first reason as its description. A review sets it
+# again on the same head, so a second approval turns it green with no push; `main` can require it, and
+# GitHub's auto-merge then waits for it. Both jobs hold `statuses: write` for it, so a caller grants it
+# on the job that calls this workflow (docs/release-record.md).
 
 name: Record a release
 
@@ -101,7 +115,7 @@ jobs:
       pull-requests: write   # write the record into the PR body
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
-      statuses: write        # read its commit statuses, and post the dispatched runs' results as statuses on the evidence commit
+      statuses: write        # read its commit statuses, post the dispatched runs' results as statuses on the evidence commit, and set `shipyard/release`
       actions: write         # download the results artifact; run the required-check workflows; read the event of each check run's workflow run
       id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
     env:
@@ -213,6 +227,7 @@ jobs:
       - name: Make the record and commit the evidence
         shell: bash
         env:
+          SHIPYARD_SHA: ${{ steps.self.outputs.sha }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GIT_AUTHOR_NAME: github-actions[bot]
@@ -221,9 +236,10 @@ jobs:
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
           args=()
+          if [[ -n "$SHIPYARD_SHA" ]]; then args+=(--shipyard-sha "$SHIPYARD_SHA"); fi
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
-          node shipyard/bin/shipyard record --from-candidate --release-run "$RESULTS_RUN" --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
+          node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
 
       - name: Push the evidence
@@ -547,13 +563,15 @@ jobs:
       - name: Write the record into the PR body
         shell: bash
         env:
+          SHIPYARD_SHA: ${{ steps.self.outputs.sha }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           args=()
+          if [[ -n "$SHIPYARD_SHA" ]]; then args+=(--shipyard-sha "$SHIPYARD_SHA"); fi
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
-          node shipyard/bin/shipyard record --from-candidate --release-run "$RESULTS_RUN" --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
+          node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
 
   # A review: the same record, read again from what the candidate already holds. No evidence is
@@ -576,7 +594,7 @@ jobs:
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
       actions: read          # the event of each check run's workflow run (a Dependabot or scheduled run is not judged)
-      statuses: read         # and its commit statuses
+      statuses: write        # read its commit statuses, and set `shipyard/release` on the head (the one write this job makes besides the body)
       id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
     env:
       PR: ${{ inputs.pr }}
@@ -663,10 +681,12 @@ jobs:
       - name: Write the record into the PR body from the committed evidence
         shell: bash
         env:
+          SHIPYARD_SHA: ${{ steps.self.outputs.sha }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           args=()
+          if [[ -n "$SHIPYARD_SHA" ]]; then args+=(--shipyard-sha "$SHIPYARD_SHA"); fi
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
           node shipyard/bin/shipyard record --from-evidence --update --pr "$PR" \

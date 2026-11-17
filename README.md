@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="logo/shipyard-logo-darkmode.svg">
+  <img src="logo/shipyard-logo.svg" alt="The Shipyard logo" width="112">
+</picture>
+
 # Shipyard
 
 Shared release automation for Turbot repositories. Shipyard holds the reusable GitHub Actions workflows and the scripts that:
@@ -16,17 +21,17 @@ This repository is a published copy. Its source is turbot/shipyard, and every Sh
 
 Nothing is written here by hand. The repository's rules let only the publish job write a branch or a tag.
 
-## Pin by commit
+## Call it at the major tag
 
-Call a workflow at a full 40-character commit, never a tag or a branch:
+Call a workflow at `v0` while the version is 0.x, and at `v1` from 1.0.0:
 
 ```yaml
 jobs:
   changelog-line:
-    uses: turbot/shipyard-workflows/.github/workflows/changelog-line.yml@<40-character commit sha>
+    uses: turbot/shipyard-workflows/.github/workflows/changelog-line.yml@v0
 ```
 
-A tag tells you which release a commit is; the commit is what you pin. A workflow checks out this repository at its own commit and runs the scripts from there, so a pinned caller runs exactly the code it pinned.
+Each release moves its major tag to the release's own commit, so a caller runs the latest release with no pull request. The repository's rules let only the publish job create, move or delete a tag, and it does so after a release a person approved. A workflow checks out this repository at its own commit and runs the scripts from there. To hold a caller back on one release, call a full 40-character commit in place of the tag, and move it on when you are ready.
 
 ## No pull requests
 

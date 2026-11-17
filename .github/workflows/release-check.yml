@@ -2,8 +2,8 @@
 # candidate (docs/release-check.md). It sets the commit status `release-check` on the PR's head.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
-# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by
-# commit. See docs/release-check.md for the caller.
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit. See docs/release-check.md for the caller.
 #
 # Nothing here runs the candidate's code: git is asked for commits, trees and blobs, and the
 # PR's text is data. Shipyard runs at the commit this workflow itself was called at.

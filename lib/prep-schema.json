@@ -138,6 +138,11 @@
                   ],
                   "additionalProperties": false,
                   "properties": {
+                    "name": {
+                      "description": "A short name for the item, 2 to 4 words: the #releases post shows it in italics before the text. Every item outside the \"Before you update\" section has one.",
+                      "$ref": "#/$defs/text",
+                      "maxLength": 60
+                    },
                     "text": {
                       "description": "The item, as users read it.",
                       "$ref": "#/$defs/text"
