@@ -1,5 +1,5 @@
-# Writes the control record on a release PR: the six rows, the evidence committed on the
-# candidate, and HOLD in place of SHIP when a test, a smoke step or a check did not pass.
+# Writes the verdict and the audit record on a release PR, with the evidence committed on the
+# candidate, and "Do not approve" (a HOLD) when a test, a smoke step or a check did not pass.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy pinned by

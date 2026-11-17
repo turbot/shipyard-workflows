@@ -2,37 +2,56 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/turbot/shipyard/lib/prep-schema.json",
   "title": "Shipyard prep file",
-  "description": "The one file the prep run returns: the level, the group of each PR, the release notes and the report's words. docs/prep-file.md explains each field.",
+  "description": "The one file the prep run returns: the level, the group of each PR, the release notes and the report's words for the release PR's page. docs/prep-file.md explains each field.",
   "type": "object",
-  "required": ["format", "level", "groups", "notes", "report"],
+  "required": [
+    "format",
+    "level",
+    "groups",
+    "notes",
+    "report"
+  ],
   "additionalProperties": false,
   "properties": {
     "format": {
-      "description": "The version of this format.",
-      "const": 1
+      "description": "The version of this format. Format 1 (with summary and risks as sentences) is no longer read: write format 2.",
+      "const": 2
     },
     "level": {
       "description": "The level of the release, why, and an answer for each read-first flag in the facts.",
       "type": "object",
-      "required": ["bump", "reasons", "flags"],
+      "required": [
+        "bump",
+        "reasons",
+        "flags"
+      ],
       "additionalProperties": false,
       "properties": {
         "bump": {
           "description": "The semver level of the release.",
-          "enum": ["major", "minor", "patch"]
+          "enum": [
+            "major",
+            "minor",
+            "patch"
+          ]
         },
         "reasons": {
           "description": "Why this level, one sentence each.",
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/text" }
+          "items": {
+            "$ref": "#/$defs/text"
+          }
         },
         "flags": {
           "description": "An answer for each read-first flag in the facts.",
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["flag", "answer"],
+            "required": [
+              "flag",
+              "answer"
+            ],
             "additionalProperties": false,
             "properties": {
               "flag": {
@@ -53,18 +72,34 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "Added": { "$ref": "#/$defs/prList" },
-        "Changed": { "$ref": "#/$defs/prList" },
-        "Fixed": { "$ref": "#/$defs/prList" },
-        "Removed": { "$ref": "#/$defs/prList" },
-        "Security": { "$ref": "#/$defs/prList" },
-        "Internal": { "$ref": "#/$defs/prList" }
+        "Added": {
+          "$ref": "#/$defs/prList"
+        },
+        "Changed": {
+          "$ref": "#/$defs/prList"
+        },
+        "Fixed": {
+          "$ref": "#/$defs/prList"
+        },
+        "Removed": {
+          "$ref": "#/$defs/prList"
+        },
+        "Security": {
+          "$ref": "#/$defs/prList"
+        },
+        "Internal": {
+          "$ref": "#/$defs/prList"
+        }
       }
     },
     "notes": {
       "description": "The release notes, for users: public text with no internal term, private link or file path.",
       "type": "object",
-      "required": ["title", "summary", "sections"],
+      "required": [
+        "title",
+        "summary",
+        "sections"
+      ],
       "additionalProperties": false,
       "properties": {
         "title": {
@@ -81,7 +116,10 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["heading", "items"],
+            "required": [
+              "heading",
+              "items"
+            ],
             "additionalProperties": false,
             "properties": {
               "heading": {
@@ -94,7 +132,10 @@
                 "minItems": 1,
                 "items": {
                   "type": "object",
-                  "required": ["text", "covers"],
+                  "required": [
+                    "text",
+                    "covers"
+                  ],
                   "additionalProperties": false,
                   "properties": {
                     "text": {
@@ -115,93 +156,154 @@
       }
     },
     "report": {
-      "description": "The report's words. The approver's part (each change with its before and after, safety, the risks and the internal lines) tops the release PR; the proof, what was not tested and the notes for the release manager are folded below it. Together they are 300 words or fewer.",
+      "description": "The release manager's words for the release PR's page, which a person who does not know how releases run reads in under a minute: the headline, what changes, could it break anything and how to go back. Nothing above the page's folds may hold a word of how releases run, a PR number, a commit, a file path or a config key.",
       "type": "object",
-      "required": ["summary", "changes", "safety", "risks", "internal", "untested", "managerNotes"],
+      "required": [
+        "headline",
+        "changes",
+        "safety",
+        "risks",
+        "undo",
+        "managerNotes"
+      ],
       "additionalProperties": false,
       "properties": {
-        "summary": {
-          "description": "What this release is, in a sentence or two. It heads the folded proof.",
+        "headline": {
+          "description": "What the release does, 8 words or fewer. It follows the product and version in the page's heading.",
           "$ref": "#/$defs/text"
         },
         "changes": {
-          "description": "What changes for users: a short name for each change, what a person had before and has after it, what proves it, and the PRs it is about.",
+          "description": "Each change a user sees, 5 at most: what they had before, what they have now, who needs it, and a short label. A row may cover several PRs. Every PR a user can see is in some change's covers, unless the list is full.",
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["change", "before", "after", "proof", "covers"],
+            "required": [
+              "before",
+              "after",
+              "label",
+              "covers"
+            ],
             "additionalProperties": false,
             "properties": {
-              "change": {
-                "description": "A short name for the change, a few words: its heading in the approver's part.",
-                "$ref": "#/$defs/text"
-              },
               "before": {
-                "description": "What a person saw or had before this release, in plain words.",
+                "description": "What a person had or saw before this release, in plain words.",
                 "$ref": "#/$defs/text"
               },
               "after": {
-                "description": "What a person sees or has after it, in plain words.",
+                "description": "What they have now, in plain words, starting with Now when it reads well.",
                 "$ref": "#/$defs/text"
               },
-              "proof": {
-                "description": "What proves the change: a test by name, a check that ran, a number. Folded below the approver's part.",
+              "who": {
+                "description": "Optional: who needs the change, or what it is for.",
+                "$ref": "#/$defs/text"
+              },
+              "label": {
+                "description": "The change in 2 to 4 words, such as \"the mod page change\": the page's Still needed row names it.",
                 "$ref": "#/$defs/text"
               },
               "covers": {
-                "description": "The PRs in the range this change is about. The release PR shows them beside the change; a PR a user can see that no change covers gets a row that says no proof was given.",
+                "description": "The PRs in the range this change is about. They are named in the audit record, never above the folds.",
                 "$ref": "#/$defs/prList",
                 "minItems": 1
               }
             }
-          }
+          },
+          "maxItems": 5
         },
         "safety": {
-          "description": "Could this release break something? The answer for the approver: no and why not, or what to watch.",
-          "$ref": "#/$defs/text"
+          "description": "Could it break anything? The answer, 4 words or fewer, starting with an answer word (No, Not, Unlikely, Yes, ...), and one line of why, 25 words or fewer.",
+          "type": "object",
+          "required": [
+            "answer",
+            "why"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "answer": {
+              "description": "The answer, 4 words or fewer, starting with its answer word.",
+              "$ref": "#/$defs/text"
+            },
+            "why": {
+              "description": "Why, in one line of 25 words or fewer.",
+              "$ref": "#/$defs/text"
+            }
+          }
         },
         "risks": {
-          "description": "Each risk to users or production, and what we do if it happens. A note about running the release goes in managerNotes.",
+          "description": "What could go wrong and what then happens, one row each of the page's If | Then table. The tool adds the last row, how to go back.",
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["risk", "undo"],
+            "required": [
+              "if",
+              "then"
+            ],
             "additionalProperties": false,
             "properties": {
-              "risk": { "$ref": "#/$defs/text" },
-              "undo": { "$ref": "#/$defs/text" }
+              "if": {
+                "description": "What could go wrong, as the If cell reads it: \"the release fails before the site updates\".",
+                "$ref": "#/$defs/text"
+              },
+              "then": {
+                "description": "What then happens, or what we do.",
+                "$ref": "#/$defs/text"
+              },
+              "untested": {
+                "description": "Optional: why this case was not tested. The page shows it after the If text.",
+                "$ref": "#/$defs/text"
+              }
+            }
+          }
+        },
+        "undo": {
+          "description": "How to go back: what a repo does (the tool names the version) and how long it takes. It is the last row of the If | Then table.",
+          "type": "object",
+          "required": [
+            "how",
+            "howLong"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "how": {
+              "description": "What going back is, in a few words that name no version: \"we publish it again\".",
+              "$ref": "#/$defs/text"
+            },
+            "howLong": {
+              "description": "How long it takes, from the repo's real merge-to-live time: \"About 20 minutes\".",
+              "$ref": "#/$defs/text"
             }
           }
         },
         "internal": {
-          "description": "A plain line for each change users do not see, and the PRs it is about. Every PR grouped Internal is in some line's covers.",
+          "description": "Each change no user sees, 12 words or fewer: required when a PR is grouped Internal, left out when none is.",
           "type": "array",
+          "minItems": 1,
           "items": {
             "type": "object",
-            "required": ["text", "covers"],
+            "required": [
+              "text",
+              "covers"
+            ],
             "additionalProperties": false,
             "properties": {
               "text": {
-                "description": "The change in a few plain words, never the PR's title.",
+                "description": "The change, 12 words or fewer.",
                 "$ref": "#/$defs/text"
               },
               "covers": {
-                "description": "The PRs in the range this line is about.",
+                "description": "The PRs in the range this item is about.",
                 "$ref": "#/$defs/prList",
                 "minItems": 1
               }
             }
           }
         },
-        "untested": {
-          "description": "What was not tested.",
-          "type": "array",
-          "items": { "$ref": "#/$defs/text" }
-        },
         "managerNotes": {
-          "description": "Notes for the person running the release (a paused run to approve, a step to run again), folded under For the release manager.",
+          "description": "Notes for the person running the release (a paused run to approve, a step to run again). They are posted as a comment on the release PR, never in its body.",
           "type": "array",
-          "items": { "$ref": "#/$defs/text" }
+          "items": {
+            "$ref": "#/$defs/text"
+          }
         }
       }
     }
@@ -216,7 +318,10 @@
       "description": "PR numbers, each once.",
       "type": "array",
       "uniqueItems": true,
-      "items": { "type": "integer", "minimum": 1 }
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
     }
   }
 }
