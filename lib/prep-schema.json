@@ -177,6 +177,10 @@
           "description": "What the release does, 8 words or fewer. It follows the product and version in the page's heading.",
           "$ref": "#/$defs/text"
         },
+        "ask": {
+          "description": "The paragraph of the Slack ask, written as a person asking a colleague to approve would write it: it starts with \"This release\", is 15 to 70 words of plain sentences, says what changes and what could go wrong, and holds no count of PRs or commits. The tool adds the greeting, the release PR's link, the sentence on the checks and the thanks. A cut asks for it; a prep file cut before it existed is read without.",
+          "$ref": "#/$defs/text"
+        },
         "changes": {
           "description": "Each change a user sees, 5 at most: what they had before, what they have now, and a short label. A row may cover several PRs. Every PR a user can see is in some change's covers, unless the list is full.",
           "type": "array",
