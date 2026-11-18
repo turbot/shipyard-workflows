@@ -39,7 +39,7 @@ on:
         default: ''
     secrets:
       product_token:
-        description: Reads the product repo and comments on its release PR. The workflow's own token when left out.
+        description: Reads the product repo. The workflow's own token when left out.
         required: false
       jobs_token:
         description: Writes issues in the repo that calls this. The workflow's own token when left out.
