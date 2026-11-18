@@ -1,0 +1,115 @@
+# The ship signal of a repo that deploys on merge: waits for the production deployment of a commit to report success.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit. It is for a light release
+# (docs/how-we-release.md, "Light releases", docs/release-deployment.md): a repo whose merge to `main` makes Vercel
+# deploy it, which is the repo's ship. The caller runs this job on a push to main, with the merge commit, then calls
+# tag.yml with `ship-result: ${{ needs.<this job>.result }}`, so a failed deployment tags nothing.
+#
+# It is a workflow of its own, and not a step of tag.yml, so that no caller of tag.yml has to grant `deployments: read`.
+# A repo whose merge has no deployment gets `result=none` after a short wait, and its signal is the merge.
+#
+# Nothing a caller passes is put into a shell line: every input goes through an environment variable and is checked there.
+
+name: Deployment
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: The merge commit of the release PR (github.sha on a push to main).
+        type: string
+        required: true
+      environment:
+        description: The deployment environment that counts, by the start of its name and case apart (Vercel's is Production).
+        type: string
+        default: production
+      wait:
+        description: How many minutes (at most 120) to wait for the deployment to finish.
+        type: string
+        default: '30'
+      grace:
+        description: How many seconds (at most 600) to wait for the commit's first deployment to appear before the signal is the merge.
+        type: string
+        default: '120'
+    outputs:
+      result:
+        description: success when the production deployment reported it, none when the commit has no deployment (the signal is the merge).
+        value: ${{ jobs.deployment.outputs.result }}
+
+permissions: {}
+
+jobs:
+  deployment:
+    name: deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read       # check out shipyard at the commit this workflow runs from
+      deployments: read    # the commit's deployments and their statuses
+      id-token: write      # learn which commit of this workflow is running (job_workflow_sha)
+    outputs:
+      result: ${{ steps.wait.outputs.result }}
+    steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          SHA: ${{ inputs.sha }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          WAIT: ${{ inputs.wait }}
+          GRACE: ${{ inputs.grace }}
+        run: |
+          fail() { echo "::error title=Deployment::$1"; exit 2; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || fail 'sha must be a full 40-character commit id'
+          [[ "$ENVIRONMENT" =~ ^[A-Za-z0-9\ ._:-]{1,60}$ ]] || fail 'environment must be the name of a deployment environment'
+          [[ "$WAIT" =~ ^[0-9]{1,3}$ && "$WAIT" -le 120 ]] || fail 'wait is a number of minutes, at most 120'
+          [[ "$GRACE" =~ ^[0-9]{1,3}$ && "$GRACE" -le 600 ]] || fail 'grace is a number of seconds, at most 600'
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/deployment.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows deployment.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Deployment::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      - name: Wait for the production deployment
+        id: wait
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          WAIT: ${{ inputs.wait }}
+          GRACE: ${{ inputs.grace }}
+        run: node shipyard/bin/shipyard deployment --sha "$SHA" --environment "$ENVIRONMENT" --wait "$WAIT" --grace "$GRACE"

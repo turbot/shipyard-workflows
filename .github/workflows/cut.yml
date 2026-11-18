@@ -16,6 +16,8 @@
 #      the branch on it, and the artifact. The commit the facts read must be in the history of the commit
 #      the run started from, a re-ship's in the base's. The checkout is never committed to or pushed from;
 #   4. upload the artifact: the files `branch`, `sha`, `title` and `body.md`.
+# A light release (input `profile: light`) skips the prep file and its lint: the cut makes the version from the day and writes
+# no CHANGELOG section or release notes (docs/how-we-release.md, "Light releases").
 # A re-ship (input `reship`) skips the prep file and the facts: the cut reads the version's own files
 # at the commit, checks its release PR merged and its ship run failed, and makes the branch again. Its
 # input `fixes` names commits of the working branch, which the cut cherry-picks onto the branch.
@@ -59,6 +61,11 @@ on:
         type: string
         required: false
         default: CHANGELOG.md
+      profile:
+        description: 'light: a light release (docs/how-we-release.md, "Light releases"), for a repo whose .github/release.json says "profile": "light". The cut reads no prep file and writes no CHANGELOG section or release notes; its version is the day''s. Leave out prep-run and prep-file. Empty: the full release.'
+        type: string
+        required: false
+        default: ''
       reship:
         description: A re-ship (docs/release-cut.md) - the version whose release PR merged and whose ship run failed. Start the run on the working branch. The cut makes release/<version> again from the commit, which must be the tip of the branch the version merged into; no prep file is read. Leave out prep-run and prep-file.
         type: string
@@ -93,6 +100,7 @@ jobs:
       TAG_PREFIX: ${{ inputs.tag-prefix }}
       BASE: ${{ inputs.base }}
       CHANGELOG: ${{ inputs.changelog }}
+      PROFILE: ${{ inputs.profile }}
       RESHIP: ${{ inputs.reship }}
       FIXES: ${{ inputs.fixes }}
     steps:
@@ -101,10 +109,13 @@ jobs:
         run: |
           fail() { echo "::error title=Cut::$1"; exit 2; }
           [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail 'commit must be a full 40-character commit id'
+          [[ -z "$PROFILE" || "$PROFILE" = light ]] || fail 'profile is light, or empty for the full release'
+          if [[ -n "$PROFILE" && -n "$RESHIP" ]]; then fail 'a re-ship is of a version that merged: leave out profile'; fi
+          if [[ -n "$PROFILE" && ( -n "$PREP_RUN" || -n "$PREP_FILE" ) ]]; then fail 'a light release reads no prep file: leave out prep-run and prep-file'; fi
           if [[ -n "$RESHIP" ]]; then
             [[ "$RESHIP" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail 'reship must be a version, X.Y.Z'
             if [[ -n "$PREP_RUN" || -n "$PREP_FILE" ]]; then fail 'a re-ship reads no prep file: leave out prep-run and prep-file'; fi
-          else
+          elif [[ -z "$PROFILE" ]]; then
             if [[ -n "$PREP_RUN" && -n "$PREP_FILE" ]]; then fail 'name the prep file once: prep-run or prep-file, not both'; fi
             if [[ -z "$PREP_RUN" && -z "$PREP_FILE" ]]; then fail 'name the prep file: prep-run (the prep job'"'"'s run) or prep-file (a path in the repo)'; fi
           fi
@@ -178,6 +189,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/release"
           if [[ -n "$RESHIP" ]]; then echo 'A re-ship reads no prep file.'; exit 0; fi
+          if [[ -n "$PROFILE" ]]; then echo 'A light release reads no prep file.'; exit 0; fi
           if [[ -n "$PREP_RUN" ]]; then
             conclusion=$(gh run view "$PREP_RUN" --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)
             if [[ "$conclusion" != "success" ]]; then
@@ -205,6 +217,7 @@ jobs:
         shell: bash
         run: |
           if [[ -n "$RESHIP" ]]; then echo 'A re-ship has no prep file to check.'; exit 0; fi
+          if [[ -n "$PROFILE" ]]; then echo 'A light release has no prep file to check.'; exit 0; fi
           node shipyard/bin/shipyard lint-prep "$RUNNER_TEMP/release/prep.json" --facts "$RUNNER_TEMP/release/facts.json"
 
       - name: Cut the release
@@ -227,6 +240,17 @@ jobs:
             if [[ -n "$FIXES" ]]; then fixes=(--fixes "$FIXES"); fi
             node shipyard/bin/shipyard cut --reship "$RESHIP" --tag-prefix "$TAG_PREFIX" --repo "$GITHUB_REPOSITORY" \
               --dir caller --out "$RUNNER_TEMP/release/release-pr" --changelog "$CHANGELOG" "${work[@]}" "${fixes[@]}"
+            exit 0
+          fi
+          if [[ -n "$PROFILE" ]]; then
+            # A light release: no prep file, no CHANGELOG section. The cut refuses facts that do not say the repo is light.
+            # The start names the working branch's tip as it is when the start runs, which can be newer than the commit this run was
+            # queued at (a PR merged in between), so the commit must be in the history of the branch's tip the checkout fetched.
+            within="$GITHUB_SHA"
+            if [ "$GITHUB_REF_TYPE" = "branch" ]; then within="origin/$GITHUB_REF_NAME"; fi
+            node shipyard/bin/shipyard cut \
+              --facts "$RUNNER_TEMP/release/facts.json" \
+              --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --within "$within" "${work[@]}"
             exit 0
           fi
           node shipyard/bin/shipyard cut \

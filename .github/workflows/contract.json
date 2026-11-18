@@ -53,6 +53,19 @@
         }
       }
     },
+    "deployment.yml": {
+      "inputs": [
+        "sha"
+      ],
+      "secrets": [],
+      "jobs": {
+        "deployment": {
+          "contents": "read",
+          "deployments": "read",
+          "id-token": "write"
+        }
+      }
+    },
     "prep.yml": {
       "inputs": [
         "prep"

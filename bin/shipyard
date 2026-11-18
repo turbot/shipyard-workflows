@@ -15,6 +15,7 @@ const STEPS = {
   record: () => require('../lib/record-command'),
   ask: () => require('../lib/ask-command'),
   tag: () => require('../lib/tag-command'),
+  deployment: () => require('../lib/deployment-command'),
   'merge-back': () => require('../lib/merge-back-command'),
   announce: () => require('../lib/announce-command'),
   start: () => require('../lib/start-command'),

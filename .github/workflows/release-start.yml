@@ -45,6 +45,19 @@ on:
         description: Writes issues in the repo that calls this. The workflow's own token when left out.
         required: false
 
+    # A light repo (profile: light in its release.json) files no prep job: the start names the commit to cut, and the caller's
+    # next job calls cut.yml with `profile: light` and that commit (docs/how-we-release.md, "Light releases").
+    outputs:
+      cut:
+        description: "true when the start decided a light release should be cut now, else false."
+        value: ${{ jobs.start.outputs.cut }}
+      commit:
+        description: The full commit to cut, when `cut` is true.
+        value: ${{ jobs.start.outputs.commit }}
+      branch:
+        description: The branch the commit is on, when `cut` is true.
+        value: ${{ jobs.start.outputs.branch }}
+
 permissions: {}
 
 # One run at a time for each product and trigger: a daily start never queues behind a release:now
@@ -58,6 +71,10 @@ jobs:
     name: start
     runs-on: ubuntu-latest
     timeout-minutes: 200  # a release:now start may wait up to 180 minutes for its full check
+    outputs:
+      cut: ${{ steps.start.outputs.cut }}
+      commit: ${{ steps.start.outputs.commit }}
+      branch: ${{ steps.start.outputs.branch }}
     permissions:
       contents: read   # check out the family files, and the product repo with the workflow's own token
       pull-requests: read  # list the open pull requests and read a release:now one, with the workflow's own token on a private product repo
@@ -138,6 +155,7 @@ jobs:
           persist-credentials: false
 
       - name: Start the release
+        id: start
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.product_token || github.token }}
