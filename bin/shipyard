@@ -18,12 +18,14 @@ const STEPS = {
   deployment: () => require('../lib/deployment-command'),
   'docs-preview': () => require('../lib/docs-preview-command'),
   'site-docs-preview': () => require('../lib/site-docs-preview-command'),
+  'docs-publish': () => require('../lib/docs-publish-command'),
   'merge-back': () => require('../lib/merge-back-command'),
   announce: () => require('../lib/announce-command'),
   start: () => require('../lib/start-command'),
   pin: () => require('../lib/pin-command'),
   'private-data': () => require('../lib/private-data-command'),
   publish: () => require('../lib/publish-command'),
+  'secret-scan': () => require('../lib/secret-scan-command'),
 };
 
 async function main(argv) {

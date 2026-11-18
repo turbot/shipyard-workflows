@@ -87,6 +87,23 @@
         }
       }
     },
+    "docs-publish.yml": {
+      "inputs": [
+        "app-client-id",
+        "site",
+        "site-url"
+      ],
+      "secrets": [
+        "app-private-key"
+      ],
+      "jobs": {
+        "publish": {
+          "contents": "read",
+          "deployments": "write",
+          "id-token": "write"
+        }
+      }
+    },
     "prep.yml": {
       "inputs": [
         "prep"
@@ -148,6 +165,16 @@
           "issues": "write",
           "pull-requests": "read",
           "statuses": "read"
+        }
+      }
+    },
+    "secret-scan.yml": {
+      "inputs": [],
+      "secrets": [],
+      "jobs": {
+        "secret-scan": {
+          "contents": "read",
+          "id-token": "write"
         }
       }
     },

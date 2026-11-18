@@ -1,0 +1,185 @@
+# A docs repo's publish: a merge to main publishes the site and records it as a production deployment.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit. A docs repo calls it on the push to
+# `main` that a merge makes (on the light profile, the merge of its release PR). The `publish` job:
+#
+#   1. makes a deployment of the merge commit in the environment `production`, set to in progress, so the
+#      release's ship signal (deployment.yml) waits for it instead of falling back to the merge;
+#   2. calls the site's Vercel deploy hook (the `deploy-hook` secret), and starts the site's search workflow
+#      and its production workflow, each when the caller names it;
+#   3. waits for the site's production build, read from the site repo's production deployments with a
+#      token of the caller's GitHub App (and, for a production workflow, that workflow's run): a build that
+#      started after step 2 and reports success;
+#   4. sets the deployment to success with the site's address, or to failure when the build or the workflow
+#      failed, was not up within the wait, or could not be read.
+#
+# The caller grants `contents: read`, `deployments: write` (the merge commit's production deployment)
+# and `id-token: write` (learn which commit of this workflow is running). It writes no comment and edits
+# no PR body. The App's private key and the deploy hook are secrets the
+# caller passes by name, never `secrets: inherit`; each token reaches the site repo alone.
+#
+# Nothing a caller passes is put into a shell line: every value goes through an environment variable and
+# is checked there.
+
+name: Docs publish
+
+on:
+  workflow_call:
+    inputs:
+      site:
+        description: The site repo that builds the docs, as <owner>/<name>.
+        type: string
+        required: true
+      site-url:
+        description: The site's address (https), set as the deployment's environment URL when the site's build is up.
+        type: string
+        required: true
+      search-workflow:
+        description: The site's workflow that updates its search records, a file name in its .github/workflows. It takes workflow_dispatch. Empty for none.
+        type: string
+        default: ''
+      production-workflow:
+        description: A site workflow that deploys the docs to production, a file name in its .github/workflows. It takes workflow_dispatch. Empty for none (the deploy hook publishes).
+        type: string
+        default: ''
+      production-inputs:
+        description: 'The production workflow''s inputs, a JSON object of strings, such as {"docs_update":"pipes"}. Empty for none.'
+        type: string
+        default: ''
+      app-client-id:
+        description: The client ID of the GitHub App that may start the site's workflows and read their runs and its deployments.
+        type: string
+        required: true
+      wait:
+        description: How many minutes (1 to 60) to wait for the site's production build.
+        type: string
+        default: '30'
+    secrets:
+      app-private-key:
+        description: The private key of that App.
+        required: true
+      deploy-hook:
+        description: The site's Vercel deploy hook (https://api.vercel.com/v1/integrations/deploy/...). Without it, the production workflow publishes.
+        required: false
+
+permissions: {}
+
+jobs:
+  publish:
+    name: publish
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read       # check out shipyard at the commit this workflow runs from
+      deployments: write   # the merge commit's production deployment and its statuses
+      id-token: write      # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      - name: Check the inputs
+        id: inputs
+        shell: bash
+        env:
+          SITE: ${{ inputs.site }}
+          SITE_URL: ${{ inputs.site-url }}
+          SEARCH_WORKFLOW: ${{ inputs.search-workflow }}
+          PRODUCTION_WORKFLOW: ${{ inputs.production-workflow }}
+          APP_CLIENT_ID: ${{ inputs.app-client-id }}
+          WAIT: ${{ inputs.wait }}
+          HAS_HOOK: ${{ secrets.deploy-hook != '' }}
+        run: |
+          fail() { echo "::error title=Docs publish::$1"; exit 2; }
+          [[ "$SITE" =~ ^([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)$ ]] || fail 'site must be the site repo, as <owner>/<name>'
+          { echo "owner=${BASH_REMATCH[1]}"; echo "name=${BASH_REMATCH[2]}"; } >> "$GITHUB_OUTPUT"
+          [[ "$SITE_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ && ${#SITE_URL} -le 200 ]] || fail 'site-url must be the site address, such as https://powerpipe.io'
+          [[ -z "$SEARCH_WORKFLOW" || "$SEARCH_WORKFLOW" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || fail 'search-workflow must be a workflow file name, such as update-search-records.yml'
+          [[ -z "$PRODUCTION_WORKFLOW" || "$PRODUCTION_WORKFLOW" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || fail 'production-workflow must be a workflow file name'
+          [[ "$HAS_HOOK" == true || -n "$PRODUCTION_WORKFLOW" ]] || fail 'nothing to publish: pass the deploy-hook secret, or a production-workflow'
+          [[ "$APP_CLIENT_ID" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || fail 'app-client-id must be the client ID of the GitHub App'
+          [[ "$WAIT" =~ ^[0-9]{1,2}$ && "$WAIT" -ge 1 && "$WAIT" -le 60 ]] || fail 'wait is a number of minutes, from 1 to 60'
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/docs-publish.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows docs-publish.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Docs publish::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # For the site repo only, with only what starting its workflows and reading their runs needs. The action revokes it when the job ends.
+      # It may fail (the App is not installed on the site): the step below then records the deployment as a failure and says so,
+      # so the ship signal never falls back to the merge for a site that did not publish.
+      - name: Make the App's token to start the site's workflows
+        id: start
+        continue-on-error: true
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ steps.inputs.outputs.owner }}
+          repositories: ${{ steps.inputs.outputs.name }}
+          permission-actions: write
+
+      # Read-only, for the site repo alone: its production deployments say whether the build is up. It may fail (an App with no
+      # read of the site's deployments): the publish still goes ahead, and the deployment is set to failure and says why.
+      - name: Make the App's token to read the site's deployments
+        id: read
+        continue-on-error: true
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ steps.inputs.outputs.owner }}
+          repositories: ${{ steps.inputs.outputs.name }}
+          permission-deployments: read
+
+      - name: Publish the site and record it
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SITE_TOKEN: ${{ steps.start.outputs.token }}
+          READ_TOKEN: ${{ steps.read.outputs.token }}
+          DEPLOY_HOOK: ${{ secrets.deploy-hook }}
+          SITE: ${{ inputs.site }}
+          SITE_URL: ${{ inputs.site-url }}
+          SEARCH_WORKFLOW: ${{ inputs.search-workflow }}
+          PRODUCTION_WORKFLOW: ${{ inputs.production-workflow }}
+          PRODUCTION_INPUTS: ${{ inputs.production-inputs }}
+          WAIT: ${{ inputs.wait }}
+          SHA: ${{ github.sha }}
+        run: |
+          args=(--site="$SITE" --site-url="$SITE_URL" --sha="$SHA" --wait="$WAIT")
+          [[ -z "$SEARCH_WORKFLOW" ]] || args+=(--search-workflow="$SEARCH_WORKFLOW")
+          [[ -z "$PRODUCTION_WORKFLOW" ]] || args+=(--production-workflow="$PRODUCTION_WORKFLOW")
+          [[ -z "$PRODUCTION_INPUTS" ]] || args+=(--production-inputs="$PRODUCTION_INPUTS")
+          node shipyard/bin/shipyard docs-publish "${args[@]}"
