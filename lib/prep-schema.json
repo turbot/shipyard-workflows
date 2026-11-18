@@ -309,6 +309,46 @@
           "items": {
             "$ref": "#/$defs/text"
           }
+        },
+        "duringDeploy": {
+          "description": "Optional: what customers notice while the release goes out, one line of 15 words or fewer. The page shows it as its During the deploy row, only when this is set.",
+          "$ref": "#/$defs/text"
+        },
+        "personSteps": {
+          "description": "Optional: each step after the merge that a named person runs or has agreed to run, 2 at most. The page shows each as an A person's step row, with the person's profile name.",
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "required": [
+              "who",
+              "step",
+              "state"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "who": {
+                "description": "The person's GitHub login, without an @. The page writes their profile name.",
+                "type": "string",
+                "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$"
+              },
+              "step": {
+                "description": "What the person does, starting with its verb, as the page reads after their name: \"applies the Temporal settings, the last step\".",
+                "$ref": "#/$defs/text"
+              },
+              "state": {
+                "description": "to do: the person has not done it yet. agreed: the person has agreed to do it.",
+                "enum": [
+                  "to do",
+                  "agreed"
+                ]
+              }
+            }
+          }
+        },
+        "urgent": {
+          "description": "Optional: true only on a patch cut from the production tag to fix something broken now. The page adds \" (urgent fix)\" after the version in its heading. The lint refuses it on any other release.",
+          "type": "boolean"
         }
       }
     }
