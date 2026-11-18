@@ -151,6 +151,18 @@
         }
       }
     },
+    "site-docs-preview.yml": {
+      "inputs": [
+        "ref-name"
+      ],
+      "secrets": [],
+      "jobs": {
+        "preview": {
+          "contents": "write",
+          "id-token": "write"
+        }
+      }
+    },
     "tag.yml": {
       "inputs": [
         "automation-logins"

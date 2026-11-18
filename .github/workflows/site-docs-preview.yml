@@ -1,0 +1,102 @@
+# A site's docs preview: points the site's branch `docs/<branch-prefix><ref-name>` at a new empty commit.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit. A site repo calls it from the
+# workflow that docs-preview.yml starts (workflow_dispatch with the input `ref_name`), in place of
+# its own copy of the steps. The job:
+#
+#   - refuses a branch name outside `^[A-Za-z0-9._/-]+$` (and one git would not take), and writes nothing;
+#   - makes an empty commit on the tip of the site's default branch, authored and committed by
+#     github-actions[bot];
+#   - creates the branch `docs/<branch-prefix><ref-name>` at that commit, or moves it when it is there.
+#
+# Vercel's Git integration then builds that branch as the preview. It refuses a commit whose author
+# is a person outside the Vercel team and builds a bot's, so no Vercel token is needed.
+#
+# The caller grants `contents: write` (the job's GITHUB_TOKEN writes the branch) and
+# `id-token: write` (the job learns which commit of this workflow is running, to check out
+# shipyard at it). It writes only under `refs/heads/docs/` and never touches the default branch.
+# Nothing a caller passes is put into a shell line: every value goes through an environment
+# variable and is checked there.
+
+name: Site docs preview
+
+on:
+  workflow_call:
+    inputs:
+      ref-name:
+        description: The docs branch to build a preview of (the `ref_name` the docs repo sent). Only letters, digits, . _ / and -.
+        type: string
+        required: true
+      branch-prefix:
+        description: What this site puts before the branch name in `docs/<prefix><ref-name>`, such as `pipes/`. Empty for none.
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  preview:
+    name: preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write      # make the empty commit, and the branch under docs/ that Vercel builds
+      id-token: write      # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          REF_NAME: ${{ inputs.ref-name }}
+          PREFIX: ${{ inputs.branch-prefix }}
+        run: |
+          fail() { echo "::error title=Site docs preview::$1"; exit 2; }
+          [[ "$REF_NAME" =~ ^[A-Za-z0-9._/-]+$ ]] || fail 'No preview: the branch name has a character the site'"'"'s build refuses. Use only letters, digits, . _ / and -.'
+          [[ ${#REF_NAME} -le 200 ]] || fail 'No preview: the branch name is longer than 200 characters.'
+          [[ "$PREFIX" =~ ^([A-Za-z0-9._-]+/)*$ && ${#PREFIX} -le 40 ]] || fail 'branch-prefix must be empty or end in /, such as pipes/'
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/site-docs-preview.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows site-docs-preview.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Site docs preview::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      - name: Point the preview branch at an empty commit
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ inputs.ref-name }}
+          PREFIX: ${{ inputs.branch-prefix }}
+        run: node shipyard/bin/shipyard site-docs-preview --ref="$REF_NAME" --prefix="$PREFIX"

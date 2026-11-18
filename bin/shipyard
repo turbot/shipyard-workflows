@@ -17,6 +17,7 @@ const STEPS = {
   tag: () => require('../lib/tag-command'),
   deployment: () => require('../lib/deployment-command'),
   'docs-preview': () => require('../lib/docs-preview-command'),
+  'site-docs-preview': () => require('../lib/site-docs-preview-command'),
   'merge-back': () => require('../lib/merge-back-command'),
   announce: () => require('../lib/announce-command'),
   start: () => require('../lib/start-command'),
