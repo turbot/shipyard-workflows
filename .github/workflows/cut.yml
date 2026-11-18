@@ -1,4 +1,4 @@
-# Cuts a release: from the prep run's file to a pushed `release/<version>` branch and the
+# Cuts a release: from the prep run's file to a `release/<version>` branch on the remote and the
 # `release-pr` artifact the fleet's release-PR hook opens the PR from.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
@@ -7,14 +7,15 @@
 #
 # It runs in the product repo, on its working branch, as the caller's own job: the hook takes
 # only a run of the workflow the repo's declaration names, in that repo. The steps, in order, each
-# stopping the job when it fails, so nothing is pushed after a refusal:
+# stopping the job when it fails, so nothing is written to the remote after a refusal:
 #   1. make the facts at the prep job's commit (`shipyard facts`);
 #   2. check the prep file against those facts (`shipyard lint-prep`), so a prep file made for
 #      another commit, or one that fails the lint, never gets further;
-#   3. cut (`shipyard cut`): the branch, the CHANGELOG section and the notes, the artifact;
-#   4. push the branch with the caller's token (`shipyard push`), and check the remote holds it: a cut
-#      must be in the history of the commit the run started from, a re-ship in the base's;
-#   5. upload the artifact: the files `branch`, `sha`, `title` and `body.md`.
+#   3. cut (`shipyard cut`): the commit with the CHANGELOG section and the notes, made through GitHub's
+#      API with the caller's token (so GitHub signs it: a repo that requires signed commits accepts it),
+#      the branch on it, and the artifact. The commit the facts read must be in the history of the commit
+#      the run started from, a re-ship's in the base's. The checkout is never committed to or pushed from;
+#   4. upload the artifact: the files `branch`, `sha`, `title` and `body.md`.
 # A re-ship (input `reship`) skips the prep file and the facts: the cut reads the version's own files
 # at the commit, checks its release PR merged and its ship run failed, and makes the branch again. Its
 # input `fixes` names commits of the working branch, which the cut cherry-picks onto the branch.
@@ -64,7 +65,7 @@ on:
         required: false
         default: ''
       fixes:
-        description: Only with reship. The fix commits of the working branch (the merge commits of PRs already merged and reviewed there), full 40-character commit ids separated by spaces. The cut cherry-picks them, in the order given, onto release/<version> after the re-ship commit, so the release PR holds the fix with no PR into the release branch. A commit that changes a file under .github/workflows/ (the job's own token cannot push one, so a person cherry-picks it onto the release branch after the cut), is not on the working branch, did not come from a merged PR, or does not apply stops the cut before anything is pushed.
+        description: Only with reship. The fix commits of the working branch (the merge commits of PRs already merged and reviewed there), full 40-character commit ids separated by spaces. The cut cherry-picks them, in the order given, onto release/<version> after the re-ship commit, so the release PR holds the fix with no PR into the release branch. A commit that changes a file under .github/workflows/ (the job's own token cannot write one, so a person cherry-picks it onto the release branch after the cut), is not on the working branch, did not come from a merged PR, or does not apply stops the cut before anything is written to the remote.
         type: string
         required: false
         default: ''
@@ -81,7 +82,7 @@ jobs:
       group: shipyard-cut-${{ github.repository }}
       cancel-in-progress: false
     permissions:
-      contents: write       # push release/<version> (the caller's token)
+      contents: write       # make the commit and release/<version> through the API (the caller's token)
       pull-requests: read   # the facts read each PR; the cut looks for candidates holding a number
       actions: read         # download the prep job's artifact
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
@@ -156,8 +157,8 @@ jobs:
           persist-credentials: false
 
       # The prep job's commit, with every tag and branch: the facts read the tags, the cut looks at
-      # the remote branches, and the push checks the commit is in the history of this run's own
-      # (a re-ship's: of the base's).
+      # the remote branches, and the cut checks the commit is in the history of this run's own
+      # (a re-ship's: it is the tip of the base's).
       # No credentials stay in the checkout: the facts' detector is the repo's own code.
       - name: Check out the repo at the prep job's commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -210,10 +211,6 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          GIT_AUTHOR_NAME: github-actions[bot]
-          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
-          GIT_COMMITTER_NAME: github-actions[bot]
-          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
           # The branch this run started on is the work branch the candidate comes from: the cut commit
           # records it, and the merge-back after the tag reads it. A run on a tag records none.
@@ -223,7 +220,9 @@ jobs:
             # A re-ship: the version that merged, cut again from the commit with the files it left
             # there, and the work branch its first cut recorded.
             # `fixes` are commits of the working branch this run started on, cherry-picked after the re-ship
-            # commit; the cut checks each and stops before anything is pushed when one fails.
+            # commit; the cut checks each and stops before anything is written when one fails. A re-ship is
+            # cut from the tip of the base the version merged into, which is not in the working branch's
+            # history (the failed ship made no tag, so nothing merged back): the cut checks it is that tip.
             fixes=()
             if [[ -n "$FIXES" ]]; then fixes=(--fixes "$FIXES"); fi
             node shipyard/bin/shipyard cut --reship "$RESHIP" --tag-prefix "$TAG_PREFIX" --repo "$GITHUB_REPOSITORY" \
@@ -232,27 +231,7 @@ jobs:
           fi
           node shipyard/bin/shipyard cut \
             --facts "$RUNNER_TEMP/release/facts.json" --prep "$RUNNER_TEMP/release/prep.json" \
-            --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" "${work[@]}"
-
-      # The only step that pushes. It checks the artifact's files agree with the branch's tip and that
-      # the commit the facts read is in the history of the commit this run started from (a re-ship's cut
-      # commit: of origin/<base>).
-      - name: Push the release branch
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          branch=$(cat "$RUNNER_TEMP/release/release-pr/branch")
-          if [[ -n "$RESHIP" ]]; then
-            # A re-ship is cut from the tip of the base the version merged into, which is not in the
-            # working branch's history (the failed ship made no tag, so nothing merged back). Its
-            # own cut has checked the commit is that tip: the push checks it is in the base.
-            base=$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).base))' "$RUNNER_TEMP/release/release-pr/release-pr.json")
-            [[ "$base" =~ ^[A-Za-z0-9._/-]+$ && "$base" != -* ]] || { echo "::error title=Cut::the artifact's base is not a branch name"; exit 2; }
-            node shipyard/bin/shipyard push --dir caller --branch "$branch" --artifact "$RUNNER_TEMP/release/release-pr" --within "origin/$base"
-            exit 0
-          fi
-          node shipyard/bin/shipyard push --dir caller --branch "$branch" --artifact "$RUNNER_TEMP/release/release-pr" --within "$GITHUB_SHA"
+            --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" --within "$GITHUB_SHA" "${work[@]}"
 
       # The four files the hook reads, and no others.
       - name: Upload the release-pr artifact

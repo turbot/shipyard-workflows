@@ -1,5 +1,5 @@
 # Writes the verdict and the audit record on a release PR, with the evidence committed on the
-# candidate, and "Do not approve" (a HOLD) when a test, a smoke step or a check did not pass.
+# candidate (through GitHub's API, so the commit is signed), and "Do not approve" (a HOLD) when a test, a smoke step or a check did not pass.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
@@ -24,8 +24,9 @@
 # number and the results of the build, the tests and staging.
 #
 # Steps: read the PR's branch; check it out; make the record and commit the evidence
-# (`shipyard record`); push the evidence commit with the caller's token (`shipyard push`); wait
-# for GitHub to show the pushed commit as the PR's head; run the caller's required-check workflows
+# (`shipyard record`: the commit is made by the API with the caller's token and the branch moved to it, a
+# fast-forward only, so a branch that moved is refused; the checkout holds no new commit yet); fetch that
+# commit into the checkout and fast-forward to it; wait for GitHub to show it as the PR's head; run the caller's required-check workflows
 # on it; wait for the other checks; report each dispatched run's jobs as commit statuses on the
 # pushed commit; delete the held runs that stand behind a finished run; write the body (`shipyard record --update`).
 # A push made with the job's own token starts no workflow that runs (GitHub holds its `pull_request`
@@ -111,7 +112,7 @@ jobs:
       group: shipyard-record-${{ github.repository }}-${{ inputs.pr }}
       cancel-in-progress: false
     permissions:
-      contents: write        # push the evidence commit to the candidate (the caller's token)
+      contents: write        # make the evidence commit on the candidate through the API (the caller's token)
       pull-requests: write   # write the record into the PR body
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
@@ -230,26 +231,37 @@ jobs:
           SHIPYARD_SHA: ${{ steps.self.outputs.sha }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GIT_AUTHOR_NAME: github-actions[bot]
-          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
-          GIT_COMMITTER_NAME: github-actions[bot]
-          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
           args=()
           if [[ -n "$SHIPYARD_SHA" ]]; then args+=(--shipyard-sha "$SHIPYARD_SHA"); fi
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
           node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
-            --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
+            --dir caller --out "$RUNNER_TEMP/record.md" --commit-out "$RUNNER_TEMP/evidence-commit" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
 
-      - name: Push the evidence
+      # The evidence commit is made on the remote, so the checkout does not hold it yet. Fetch the branch
+      # and fast-forward to exactly that commit: every later step reads the checkout's head, which is then
+      # the PR's. The token goes to git as an environment setting, never as an argument or in the URL.
+      - name: Move the checkout to the evidence commit
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.pr.outputs.branch }}
-        run: node shipyard/bin/shipyard push --dir caller --branch "$BRANCH"
+        run: |
+          sha=$(cat "$RUNNER_TEMP/evidence-commit")
+          if [[ -z "$sha" ]]; then
+            echo 'The candidate already holds this evidence: no commit was made.'
+            exit 0
+          fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=Record::the evidence commit is not a commit id"; exit 2; }
+          server="${GITHUB_SERVER_URL:-https://github.com}"
+          header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true GIT_CONFIG_COUNT=1 "GIT_CONFIG_KEY_0=http.${server%/}/.extraheader" "GIT_CONFIG_VALUE_0=$header"
+          git -C caller fetch --quiet origin "refs/heads/$BRANCH"
+          git -C caller merge --ff-only --quiet "$sha" \
+            || { echo "::error title=Record::$BRANCH does not hold the evidence commit ${sha:0:7} as a fast-forward of the checkout"; exit 2; }
 
-      # GitHub shows a pushed commit as the PR's head a moment later; the record refuses a PR whose
+      # GitHub shows the new commit as the PR's head a moment later; the record refuses a PR whose
       # head is not the checkout's. Bounded: two minutes.
       - name: Wait for the PR to show the pushed commit
         shell: bash

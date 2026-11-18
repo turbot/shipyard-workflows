@@ -12,7 +12,6 @@ const STEPS = {
   changelog: () => require('../lib/changelog-command'),
   cut: () => require('../lib/cut-command'),
   'release-check': () => require('../lib/release-check-command'),
-  push: () => require('../lib/push-command'),
   record: () => require('../lib/record-command'),
   ask: () => require('../lib/ask-command'),
   tag: () => require('../lib/tag-command'),
