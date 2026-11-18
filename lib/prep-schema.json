@@ -178,7 +178,7 @@
           "$ref": "#/$defs/text"
         },
         "changes": {
-          "description": "Each change a user sees, 5 at most: what they had before, what they have now, who needs it, and a short label. A row may cover several PRs. Every PR a user can see is in some change's covers, unless the list is full.",
+          "description": "Each change a user sees, 5 at most: what they had before, what they have now, and a short label. A row may cover several PRs. Every PR a user can see is in some change's covers, unless the list is full.",
           "type": "array",
           "items": {
             "type": "object",
@@ -195,11 +195,7 @@
                 "$ref": "#/$defs/text"
               },
               "after": {
-                "description": "What they have now, in plain words, starting with Now when it reads well.",
-                "$ref": "#/$defs/text"
-              },
-              "who": {
-                "description": "Optional: who needs the change, or what it is for.",
+                "description": "What they have now, in plain words. The column is already headed Now, so do not start with it.",
                 "$ref": "#/$defs/text"
               },
               "label": {
