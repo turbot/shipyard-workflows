@@ -66,6 +66,27 @@
         }
       }
     },
+    "docs-preview.yml": {
+      "inputs": [
+        "app-client-id",
+        "site",
+        "vercel-project"
+      ],
+      "secrets": [
+        "app-private-key"
+      ],
+      "jobs": {
+        "link": {
+          "contents": "read",
+          "deployments": "write",
+          "id-token": "write"
+        },
+        "start": {
+          "contents": "read",
+          "id-token": "write"
+        }
+      }
+    },
     "prep.yml": {
       "inputs": [
         "prep"

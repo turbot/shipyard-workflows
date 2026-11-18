@@ -43,10 +43,10 @@
 #
 # The same step that writes the body sets one commit status, `shipyard/release`, on the PR's head (the
 # evidence commit, or the candidate when it has none), from the verdict the body shows: success for SHIP
-# with only the approval `main` requires left, pending for SHIP with a step still open (a check still
-# running, a second approver), failure for HOLD with the first reason as its description. A review sets it
-# again on the same head, so a second approval turns it green with no push; `main` can require it, and
-# GitHub's auto-merge then waits for it. Both jobs hold `statuses: write` for it, so a caller grants it
+# approved at that head with nothing else open, pending for SHIP with a step still open (a check still
+# running, a second approver) or with no approval of this head yet, failure for HOLD with the first reason
+# as its description. A review sets it again on the same head, so an approval turns it green with no push;
+# `main` can require it, and GitHub's auto-merge then waits for the approval to be recorded. Both jobs hold `statuses: write` for it, so a caller grants it
 # on the job that calls this workflow (docs/release-record.md).
 
 name: Record a release

@@ -1,0 +1,229 @@
+# A docs repo's site preview: starts it on a push, and links it on the PR as a GitHub deployment.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit. A docs repo calls it on a
+# push to a branch other than main, and on a pull request (opened, synchronize, reopened):
+#
+#   push           the `start` job makes a token of the caller's GitHub App for the site repo, and runs
+#                  the site's preview workflow on the site's default branch with `ref_name` set to the
+#                  branch. The site builds `docs/<branch-prefix><branch>` on Vercel.
+#   pull_request   the `link` job makes a deployment of the PR's head commit in the environment
+#                  `<site name> preview`, waits for the site's build of that push, and sets the deployment
+#                  to success with the preview's address, so the PR shows "deployed to <site name> preview"
+#                  with a "View deployment" button. A PR from a fork is skipped: its pushes start no build.
+#
+# It writes no comment and edits no PR body (its token holds neither issues nor pull-requests),
+# so a public docs repo never holds the PR for a bot's text. The App's private key is a secret
+# the caller passes by name, never `secrets: inherit`; each token reaches the site repo alone.
+#
+# Nothing a caller passes, and nothing from the branch or the PR, is put into a shell line: every
+# value goes through an environment variable and is checked there.
+
+name: Docs preview
+
+on:
+  workflow_call:
+    inputs:
+      site:
+        description: The site repo that builds the preview, as <owner>/<name>. Its name names the deployment environment, `<name> preview`.
+        type: string
+        required: true
+      site-workflow:
+        description: The site's preview workflow, a file name in its .github/workflows. It takes workflow_dispatch with the input ref_name.
+        type: string
+        default: build-preview.yml
+      branch-prefix:
+        description: What the site puts before the branch name in `docs/<prefix><branch>`, such as `pipes/`. Empty for none.
+        type: string
+        default: ''
+      vercel-project:
+        description: The site's Vercel project slug, the start of a preview's host (`<project>-git-<branch>-turbot`).
+        type: string
+        required: true
+      app-client-id:
+        description: The client ID of the GitHub App that may run the site's preview workflow and read its branches and deployments.
+        type: string
+        required: true
+      wait:
+        description: How many minutes (1 to 60) the PR's link waits for the preview to be up.
+        type: string
+        default: '20'
+    secrets:
+      app-private-key:
+        description: The private key of that App.
+        required: true
+
+permissions: {}
+
+jobs:
+  start:
+    name: start
+    if: ${{ github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name != 'main' && !github.event.deleted }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read       # check out shipyard at the commit this workflow runs from
+      id-token: write      # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      - name: Check the inputs
+        id: inputs
+        shell: bash
+        env:
+          SITE: ${{ inputs.site }}
+          SITE_WORKFLOW: ${{ inputs.site-workflow }}
+          APP_CLIENT_ID: ${{ inputs.app-client-id }}
+        run: |
+          fail() { echo "::error title=Docs preview::$1"; exit 2; }
+          [[ "$SITE" =~ ^([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)$ ]] || fail 'site must be the site repo, as <owner>/<name>'
+          { echo "owner=${BASH_REMATCH[1]}"; echo "name=${BASH_REMATCH[2]}"; } >> "$GITHUB_OUTPUT"
+          [[ "$SITE_WORKFLOW" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || fail 'site-workflow must be a workflow file name, such as build-preview.yml'
+          [[ "$APP_CLIENT_ID" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || fail 'app-client-id must be the client ID of the GitHub App'
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/docs-preview.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows docs-preview.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Docs preview::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # For the site repo only, with only what starting its preview workflow needs. The action revokes it when the job ends.
+      - name: Make the App's token for the site
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ steps.inputs.outputs.owner }}
+          repositories: ${{ steps.inputs.outputs.name }}
+          permission-actions: write
+
+      - name: Start the preview
+        shell: bash
+        env:
+          SITE_TOKEN: ${{ steps.app.outputs.token }}
+          SITE: ${{ inputs.site }}
+          SITE_WORKFLOW: ${{ inputs.site-workflow }}
+          REF: ${{ github.ref_name }}
+        run: node shipyard/bin/shipyard docs-preview start --site="$SITE" --workflow="$SITE_WORKFLOW" --ref="$REF"
+
+  link:
+    name: link
+    if: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened", "synchronize", "reopened"]'), github.event.action) && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read       # check out shipyard at the commit this workflow runs from, and read the PR head's commit date
+      deployments: write   # the deployment of the PR's head commit and its statuses
+      id-token: write      # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      - name: Check the inputs
+        id: inputs
+        shell: bash
+        env:
+          SITE: ${{ inputs.site }}
+          PREFIX: ${{ inputs.branch-prefix }}
+          PROJECT: ${{ inputs.vercel-project }}
+          APP_CLIENT_ID: ${{ inputs.app-client-id }}
+          WAIT: ${{ inputs.wait }}
+        run: |
+          fail() { echo "::error title=Docs preview::$1"; exit 2; }
+          [[ "$SITE" =~ ^([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)$ ]] || fail 'site must be the site repo, as <owner>/<name>'
+          { echo "owner=${BASH_REMATCH[1]}"; echo "name=${BASH_REMATCH[2]}"; } >> "$GITHUB_OUTPUT"
+          [[ "$PREFIX" =~ ^([A-Za-z0-9._-]+/)*$ && ${#PREFIX} -le 40 ]] || fail 'branch-prefix must be empty or end in /, such as pipes/'
+          [[ "$PROJECT" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]] || fail 'vercel-project must be the Vercel project slug, such as powerpipe-io'
+          [[ "$APP_CLIENT_ID" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || fail 'app-client-id must be the client ID of the GitHub App'
+          [[ "$WAIT" =~ ^[0-9]{1,2}$ && "$WAIT" -ge 1 && "$WAIT" -le 60 ]] || fail 'wait is a number of minutes, from 1 to 60'
+
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/docs-preview.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows docs-preview.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Docs preview::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # Read-only, for the site repo alone: its branch and its Vercel deployments tell this push's build from an earlier
+      # one. It may fail (an App with no read of the site's deployments): the link then waits for the preview's address
+      # to answer, and the deployment says the build could not be read.
+      - name: Make the App's token to read the site
+        id: app
+        continue-on-error: true
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ steps.inputs.outputs.owner }}
+          repositories: ${{ steps.inputs.outputs.name }}
+          permission-contents: read
+          permission-deployments: read
+
+      - name: Link the preview as a deployment
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SITE_TOKEN: ${{ steps.app.outputs.token }}
+          SITE: ${{ inputs.site }}
+          PREFIX: ${{ inputs.branch-prefix }}
+          PROJECT: ${{ inputs.vercel-project }}
+          WAIT: ${{ inputs.wait }}
+          REF: ${{ github.event.pull_request.head.ref }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: node shipyard/bin/shipyard docs-preview link --site="$SITE" --prefix="$PREFIX" --project="$PROJECT" --ref="$REF" --sha="$SHA" --wait="$WAIT"
