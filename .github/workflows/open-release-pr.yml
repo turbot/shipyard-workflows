@@ -1,0 +1,100 @@
+# Opens the release PR for a repo the fleet's release-PR hook does not serve (docs/release-cli.md). It takes the `release-pr`
+# artifact `cut.yml` uploaded in the same run, opens the PR into the base branch, and starts the repo's record workflow on the
+# release branch, because a PR made with the job's own token starts no workflow of its own.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit.
+#
+# The caller runs it as a job after the cut (`needs: cut`), in the same workflow. The PR's author is then `github-actions[bot]`,
+# which the tag job's `automation-logins` must name. Nothing here checks out the caller's repo or runs its code.
+
+name: Open the release PR
+
+on:
+  workflow_call:
+    inputs:
+      base:
+        description: The branch the release PR goes into.
+        type: string
+        default: main
+      record-workflow:
+        description: 'The file name of the repo''s workflow that calls record.yml (release-pr.yml). It must take workflow_dispatch with an input `pr`. Left empty, nothing is started.'
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  open:
+    name: open
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read        # this workflow's own commit
+      pull-requests: write  # open the release PR
+      actions: write        # download the cut's artifact, and start the record workflow
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          BASE: ${{ inputs.base }}
+          RECORD_WORKFLOW: ${{ inputs.record-workflow }}
+        run: |
+          fail() { echo "::error title=Open release PR::$1"; exit 2; }
+          [[ "$BASE" =~ ^(main|main-[0-9]+(\.[0-9]+)?)$ ]] || fail 'base is main or main-<version>'
+          [[ -z "$RECORD_WORKFLOW" || "$RECORD_WORKFLOW" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || fail 'record-workflow is the file name of a workflow of this repo'
+
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/open-release-pr.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows open-release-pr.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Open release PR::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      - name: Download the cut's artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-pr
+          path: ${{ runner.temp }}/release-pr
+
+      # The files are data: the command reads them and checks each before anything is opened.
+      - name: Open the release PR
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE: ${{ inputs.base }}
+          RECORD_WORKFLOW: ${{ inputs.record-workflow }}
+        run: |
+          args=(--dir "$RUNNER_TEMP/release-pr" --base "$BASE")
+          [ -n "$RECORD_WORKFLOW" ] && args+=("--record-workflow=$RECORD_WORKFLOW")
+          node shipyard/bin/shipyard open-release-pr "${args[@]}"

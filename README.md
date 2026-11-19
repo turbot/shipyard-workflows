@@ -17,7 +17,7 @@ Shared release automation for Turbot repositories. Shipyard holds the reusable G
 
 ## Published from turbot/shipyard
 
-This repository is a published copy. Its source is turbot/shipyard, and every Shipyard release publishes it here: the workflows land in `.github/workflows/`, with the scripts they run in `bin/` and `lib/`, as one commit tagged with the release's version (`v1.2.3`).
+This repository is a published copy. Its source is turbot/shipyard, and every Shipyard release publishes it here: the workflows land in `.github/workflows/`, with the scripts they run in `bin/` and `lib/`, and the release-report skill (`.claude/skills/release-report/SKILL.md`) with the two docs it names, `docs/prep-file.md` and `docs/release-cut.md`, as one commit tagged with the release's version (`v1.2.3`).
 
 Nothing is written here by hand. The repository's rules let only the publish job write a branch or a tag.
 

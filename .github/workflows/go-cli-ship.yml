@@ -1,0 +1,275 @@
+# The ship job of a Go CLI whose Release carries its own files (docs/release-cli.md): at the merge of a release PR it builds the
+# release with goreleaser, the version set from the release PR and publishing skipped, and uploads the archives and `checksums.txt` as
+# the artifact the tag job attaches to the GitHub Release (tag.yml, input `assets`). Nothing is published here: the tag job
+# publishes the files, and homebrew.yml writes the formula after the tag.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit.
+#
+# A caller runs it as the `ship` job of its push-to-main workflow, then `tag` (needs: ship) and `homebrew` (needs: [ship, tag]).
+# The repo's own part is its goreleaser file, its make target when it has one, and its names.
+#
+# The job reads the version from the release PR that merged as this commit (`shipyard release-version`): never from a tag, which
+# is made last, and never from a folder the merge adds. A push that is no release builds nothing and uploads nothing, and the
+# tag job finds no artifact and tags nothing.
+#
+# The repo's code (its make target and its goreleaser file) runs here, at the merge commit of a PR a person approved, in a job with
+# no release key and a read-only token. The release key is read only by the tag and homebrew jobs, in the `release` environment.
+# Nothing a caller passes is put into a shell line: each input reaches a step as an environment variable and is checked there.
+
+name: Go CLI ship
+
+on:
+  workflow_call:
+    inputs:
+      automation-logins:
+        description: 'The accounts that open release PRs, comma-separated (the same as the tag job''s). Required: a merged release/ PR from any other account is no release.'
+        type: string
+        required: true
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        default: v
+      goreleaser-config:
+        description: The goreleaser file, relative to the repo.
+        type: string
+        default: .goreleaser.yml
+      goreleaser-version:
+        description: The goreleaser version to install (the action's `version`).
+        type: string
+        default: ~> v2
+      make-target:
+        description: A make target to run before goreleaser (a generate or UI build step). Left empty, none is run.
+        type: string
+        default: ''
+      go-version-file:
+        description: The file that names the Go version, relative to the repo.
+        type: string
+        default: go.mod
+      runner:
+        description: 'The runner the job runs on (runs-on). A build that must run on an arm machine to link its arm64 CGO binary names one here, such as ubuntu-24.04-arm.'
+        type: string
+        default: ubuntu-latest
+      platform:
+        description: 'The container platform of the build image (docker run --platform), such as linux/arm64. Left empty, the image''s own.'
+        type: string
+        default: ''
+      build-image:
+        description: 'A container image that holds goreleaser and the compilers the build needs (a cross-compiling goreleaser image for a CGO build). The build runs in it, with the repo and each sibling mounted under /go/src. Left empty, goreleaser is installed on the runner.'
+        type: string
+        default: ''
+      siblings:
+        description: 'Public repos the build needs beside this one (a go.mod `replace ../name`), comma-separated, each <owner>/<name> or <owner>/<name>@<branch or tag>. Cloned at that ref, with no credential, next to the repo. Left empty, none.'
+        type: string
+        default: ''
+      artifact:
+        description: The name of the artifact the files are uploaded as. The tag job's `assets` input names the same.
+        type: string
+        default: release-assets
+    outputs:
+      release:
+        description: true when the push is the merge of a release PR and its files were built, false when the push is no release.
+        value: ${{ jobs.ship.outputs.release }}
+      tag:
+        description: The release's tag, when release is true.
+        value: ${{ jobs.ship.outputs.tag }}
+
+permissions: {}
+
+jobs:
+  ship:
+    name: ship
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read        # the merge commit, and this workflow's own commit
+      pull-requests: read   # the release PR the merge commit belongs to
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          CONFIG: ${{ inputs.goreleaser-config }}
+          GORELEASER_VERSION: ${{ inputs.goreleaser-version }}
+          MAKE_TARGET: ${{ inputs.make-target }}
+          GO_VERSION_FILE: ${{ inputs.go-version-file }}
+          ARTIFACT: ${{ inputs.artifact }}
+          BUILD_IMAGE: ${{ inputs.build-image }}
+          SIBLINGS: ${{ inputs.siblings }}
+          RUNNER: ${{ inputs.runner }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          fail() { echo "::error title=Go CLI ship::$1"; exit 2; }
+          [ -n "${AUTOMATION_LOGINS//[[:space:],]/}" ] || fail 'automation-logins names no account: name the accounts that open release PRs'
+          [[ "$TAG_PREFIX" =~ ^[A-Za-z0-9._-]*$ ]] || fail 'tag-prefix may hold only letters, digits, dot, underscore and hyphen'
+          path_ok() { [[ "$1" =~ ^[A-Za-z0-9._/-]+$ && "$1" != -* && "$1" != /* && "$1" != *..* ]]; }
+          path_ok "$CONFIG" || fail 'goreleaser-config must be a path inside the repo'
+          path_ok "$GO_VERSION_FILE" || fail 'go-version-file must be a path inside the repo'
+          [[ "$GORELEASER_VERSION" =~ ^(~>[[:space:]]*)?(latest|v?[0-9]+(\.[0-9]+){0,2})$ ]] || fail 'goreleaser-version is latest, a version, or ~> and a version'
+          [[ -z "$MAKE_TARGET" || "$MAKE_TARGET" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || fail 'make-target is the name of one target'
+          [[ "$ARTIFACT" =~ ^[A-Za-z0-9._-]{1,80}$ ]] || fail 'artifact is a name of letters, digits, dot, underscore and hyphen'
+          [[ "$RUNNER" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail 'runner is the name of a runner, such as ubuntu-latest'
+          [[ -z "$PLATFORM" || "$PLATFORM" =~ ^linux/(amd64|arm64)$ ]] || fail 'platform is linux/amd64 or linux/arm64'
+          [[ -z "$BUILD_IMAGE" || "$BUILD_IMAGE" =~ ^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$ ]] || fail 'build-image is a container image name, such as ghcr.io/example/builder:v1'
+          IFS=',' read -ra listed <<< "$SIBLINGS"
+          for item in "${listed[@]}"; do
+            item="${item//[[:space:]]/}"
+            [[ -z "$item" || "$item" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+(@[A-Za-z0-9._/-]+)?$ ]] || fail 'siblings are <owner>/<name> or <owner>/<name>@<ref>, comma-separated'
+          done
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/go-cli-ship.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows go-cli-ship.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Go CLI ship::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The version is the release PR's, found from the merge commit. A push that is no release says so, and the steps below skip.
+      - name: Find the version
+        id: version
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+        run: node shipyard/bin/shipyard release-version --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS"
+
+      # The merge commit of the release PR, with no credentials left in the checkout: the repo's own code runs from here on.
+      - name: Check out the repo at the merge
+        if: ${{ steps.version.outputs.release == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: caller
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        if: ${{ steps.version.outputs.release == 'true' }}
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: caller/${{ inputs.go-version-file }}
+          cache: false
+
+      - name: Install goreleaser
+        if: ${{ steps.version.outputs.release == 'true' && inputs.build-image == '' }}
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: ${{ inputs.goreleaser-version }}
+          install-only: true
+
+      # Public repos the build needs beside this one, cloned with no credential: none is in this job's environment for them.
+      - name: Clone the sibling repos
+        if: ${{ steps.version.outputs.release == 'true' && inputs.siblings != '' }}
+        shell: bash
+        env:
+          SIBLINGS: ${{ inputs.siblings }}
+        run: |
+          IFS=',' read -ra listed <<< "$SIBLINGS"
+          for item in "${listed[@]}"; do
+            item="${item//[[:space:]]/}"
+            [ -n "$item" ] || continue
+            repo="${item%@*}"
+            ref=""
+            if [[ "$item" == *@* ]]; then ref="${item#*@}"; fi
+            git clone --depth 1 ${ref:+--branch "$ref"} "https://github.com/${repo}.git" "${repo#*/}"
+          done
+
+      - name: Run the repo's make target
+        if: ${{ steps.version.outputs.release == 'true' && inputs.make-target != '' }}
+        shell: bash
+        working-directory: caller
+        env:
+          MAKE_TARGET: ${{ inputs.make-target }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: make "$MAKE_TARGET"
+
+      # The version is set from the release PR, and nothing is published: no release, no formula, no announcement. The tag does not
+      # exist yet, so goreleaser is told the tag it would build, and skips the check that the commit carries it.
+      - name: Build the release
+        if: ${{ steps.version.outputs.release == 'true' }}
+        shell: bash
+        working-directory: caller
+        env:
+          GORELEASER_CURRENT_TAG: ${{ steps.version.outputs.tag }}
+          CONFIG: ${{ inputs.goreleaser-config }}
+          BUILD_IMAGE: ${{ inputs.build-image }}
+          SIBLINGS: ${{ inputs.siblings }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          # In the build image, the repo and each sibling are mounted under /go/src, where its go.mod `replace` paths resolve.
+          goreleaser_run() {
+            if [ -z "$BUILD_IMAGE" ]; then goreleaser "$@"; return; fi
+            name="${GITHUB_REPOSITORY#*/}"
+            mounts=(-v "$PWD:/go/src/$name")
+            IFS=',' read -ra listed <<< "$SIBLINGS"
+            for item in "${listed[@]}"; do
+              item="${item//[[:space:]]/}"
+              [ -n "$item" ] || continue
+              repo="${item%%@*}"
+              mounts+=(-v "$(cd .. && pwd)/${repo#*/}:/go/src/${repo#*/}")
+            done
+            docker run --rm ${PLATFORM:+--platform="$PLATFORM"} -e CGO_ENABLED=1 -e GORELEASER_CURRENT_TAG "${mounts[@]}" -w "/go/src/$name" "$BUILD_IMAGE" "$@"
+          }
+          goreleaser_run release --clean --skip=publish,announce,validate --config "$CONFIG"
+
+      # Only archives and checksums.txt go on the Release, flat, and each must be the one checksums.txt lists.
+      - name: Collect the release files
+        if: ${{ steps.version.outputs.release == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/release-files"
+          mkdir -p "$out"
+          shopt -s nullglob
+          files=(caller/dist/*.tar.gz caller/dist/*.zip)
+          [ "${#files[@]}" -gt 0 ] || { echo "::error title=Go CLI ship::goreleaser made no archive in dist/"; exit 1; }
+          [ -f caller/dist/checksums.txt ] || { echo "::error title=Go CLI ship::goreleaser made no checksums.txt in dist/"; exit 1; }
+          cp "${files[@]}" caller/dist/checksums.txt "$out/"
+          (cd "$out" && sha256sum --check --strict checksums.txt)
+
+      - name: Upload the release files
+        if: ${{ steps.version.outputs.release == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact }}
+          path: ${{ runner.temp }}/release-files/*
+          if-no-files-found: error
+          retention-days: 14

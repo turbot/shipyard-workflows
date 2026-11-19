@@ -9,17 +9,19 @@
 #      release's ship signal (deployment.yml) waits for it instead of falling back to the merge;
 #   2. calls the site's Vercel deploy hook (the `deploy-hook` secret), and starts the site's search workflow
 #      and its production workflow, each when the caller names it;
-#   3. waits for the site's production build, read from the site repo's production deployments with a
-#      token of the caller's GitHub App (and, for a production workflow, that workflow's run): a build that
-#      started after step 2 and reports success;
-#   4. sets the deployment to success with the site's address, or to failure when the build or the workflow
-#      failed, was not up within the wait, could not be read, or the run was cancelled.
+#   3. waits until the site serves the merge commit or a later one: the site's build writes
+#      /docs-version.json at the site's address, naming the docs commit it built, and this job reads it
+#      there and compares it with the merge commit on this repo (and, for a production workflow, waits for
+#      that workflow's run to succeed, read with a token of the caller's GitHub App);
+#   4. sets the deployment to success with the site's address, or to failure when the workflow failed, the
+#      site did not serve the commit within the wait, a read was refused, or the run was cancelled.
 #
 # The wait is at most 50 minutes (the default is 30): the Apps' tokens last an hour, so they always outlive it. A person
 # who cancels the run ends the deployment as a failure that says it was cancelled, never in progress.
 #
-# The caller grants `contents: read`, `deployments: write` (the merge commit's production deployment)
-# and `id-token: write` (learn which commit of this workflow is running). It writes no comment and edits
+# The caller grants `contents: read` (compare the served commit with the merge commit), `deployments: write`
+# (the merge commit's production deployment) and `id-token: write` (learn which commit of this workflow is running).
+# No Vercel token is used, and nothing is written to the site repo. It writes no comment and edits
 # no PR body. The App's private key and the deploy hook are secrets the
 # caller passes by name, never `secrets: inherit`; each token reaches the site repo alone.
 #
@@ -36,7 +38,7 @@ on:
         type: string
         required: true
       site-url:
-        description: The site's address (https), set as the deployment's environment URL when the site's build is up.
+        description: The site's address (https), set as the deployment's environment URL when the site serves the commit. Its build writes /docs-version.json at the root of this address.
         type: string
         required: true
       search-workflow:
@@ -52,11 +54,11 @@ on:
         type: string
         default: ''
       app-client-id:
-        description: The client ID of the GitHub App that may start the site's workflows and read their runs and its deployments.
+        description: The client ID of the GitHub App that may start the site's workflows and read their runs.
         type: string
         required: true
       wait:
-        description: How many minutes (1 to 50) to wait for the site's production build. A longer wait is refused.
+        description: How many minutes (1 to 50) to wait for the site to serve the commit. A longer wait is refused.
         type: string
         default: '30'
     secrets:
@@ -76,7 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     permissions:
-      contents: read       # check out shipyard at the commit this workflow runs from
+      contents: read       # check out shipyard at its commit, and compare the served docs commit with the merge
       deployments: write   # the merge commit's production deployment and its statuses
       id-token: write      # learn which commit of this workflow is running (job_workflow_sha)
     steps:
@@ -153,25 +155,11 @@ jobs:
           repositories: ${{ steps.inputs.outputs.name }}
           permission-actions: write
 
-      # Read-only, for the site repo alone: its production deployments say whether the build is up. It may fail (an App with no
-      # read of the site's deployments): the publish still goes ahead, and the deployment is set to failure and says why.
-      - name: Make the App's token to read the site's deployments
-        id: read
-        continue-on-error: true
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          client-id: ${{ inputs.app-client-id }}
-          private-key: ${{ secrets.app-private-key }}
-          owner: ${{ steps.inputs.outputs.owner }}
-          repositories: ${{ steps.inputs.outputs.name }}
-          permission-deployments: read
-
       - name: Publish the site and record it
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SITE_TOKEN: ${{ steps.start.outputs.token }}
-          READ_TOKEN: ${{ steps.read.outputs.token }}
           DEPLOY_HOOK: ${{ secrets.deploy-hook }}
           SITE: ${{ inputs.site }}
           SITE_URL: ${{ inputs.site-url }}

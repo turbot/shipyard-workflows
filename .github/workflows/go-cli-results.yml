@@ -1,0 +1,260 @@
+# The candidate's results of a Go CLI (docs/release-cli.md): tests it, builds it as goreleaser would at the merge (a snapshot,
+# nothing published), installs the built Linux archive and asks it for its version, and uploads `results.json` as the artifact
+# `results` that the record reads (record.yml, input `results-run`, docs/release-record.md). A failed step is written as `fail`
+# and the job goes on, so the record says HOLD; the job itself fails only when it could not run.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit.
+#
+# A caller runs it as the `build-test-stage` job of its release-PR workflow, with the candidate's head commit as `ref`, then calls
+# record.yml with `results-run: ${{ github.run_id }}`. The repo's own part is its make targets, its goreleaser file and its names.
+#
+# The repo's code runs here with a read-only token that is not in any step's environment but the checkouts'. Nothing a caller
+# passes is put into a shell line: each input reaches a step as an environment variable and is checked there.
+
+name: Go CLI results
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The candidate's full commit id (the release PR's head).
+        type: string
+        required: true
+      binary:
+        description: The name of the program in the archive. The smoke check runs `<binary> --version`.
+        type: string
+        required: true
+      test-target:
+        description: The make target that runs the tests. Left empty, `go test ./...` runs.
+        type: string
+        default: ''
+      make-target:
+        description: A make target to run before the build (a generate or UI build step). Left empty, none is run.
+        type: string
+        default: ''
+      goreleaser-config:
+        description: The goreleaser file, relative to the repo.
+        type: string
+        default: .goreleaser.yml
+      goreleaser-version:
+        description: The goreleaser version to install (the action's `version`).
+        type: string
+        default: ~> v2
+      go-version-file:
+        description: The file that names the Go version, relative to the repo.
+        type: string
+        default: go.mod
+      runner:
+        description: 'The runner the job runs on (runs-on). A build that must run on an arm machine to link its arm64 CGO binary names one here, such as ubuntu-24.04-arm.'
+        type: string
+        default: ubuntu-latest
+      platform:
+        description: 'The container platform of the build image (docker run --platform), such as linux/arm64. Left empty, the image''s own.'
+        type: string
+        default: ''
+      build-image:
+        description: 'A container image that holds goreleaser and the compilers the build needs (a cross-compiling goreleaser image for a CGO build). The build runs in it, with the repo and each sibling mounted under /go/src. Left empty, goreleaser is installed on the runner.'
+        type: string
+        default: ''
+      siblings:
+        description: 'Public repos the build needs beside this one (a go.mod `replace ../name`), comma-separated, each <owner>/<name> or <owner>/<name>@<branch or tag>. Cloned at that ref, with no credential, next to the repo. Left empty, none.'
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  results:
+    name: results
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read        # the candidate, and this workflow's own commit
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          REF: ${{ inputs.ref }}
+          BINARY: ${{ inputs.binary }}
+          TEST_TARGET: ${{ inputs.test-target }}
+          MAKE_TARGET: ${{ inputs.make-target }}
+          CONFIG: ${{ inputs.goreleaser-config }}
+          GORELEASER_VERSION: ${{ inputs.goreleaser-version }}
+          GO_VERSION_FILE: ${{ inputs.go-version-file }}
+          BUILD_IMAGE: ${{ inputs.build-image }}
+          SIBLINGS: ${{ inputs.siblings }}
+          RUNNER: ${{ inputs.runner }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          fail() { echo "::error title=Go CLI results::$1"; exit 2; }
+          [[ "$REF" =~ ^[0-9a-f]{40}$ ]] || fail 'ref must be a full 40-character commit id'
+          [[ "$BINARY" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail 'binary is the name of the program in the archive'
+          [[ -z "$TEST_TARGET" || "$TEST_TARGET" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || fail 'test-target is the name of one make target'
+          [[ -z "$MAKE_TARGET" || "$MAKE_TARGET" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || fail 'make-target is the name of one target'
+          path_ok() { [[ "$1" =~ ^[A-Za-z0-9._/-]+$ && "$1" != -* && "$1" != /* && "$1" != *..* ]]; }
+          path_ok "$CONFIG" || fail 'goreleaser-config must be a path inside the repo'
+          path_ok "$GO_VERSION_FILE" || fail 'go-version-file must be a path inside the repo'
+          [[ "$GORELEASER_VERSION" =~ ^(~>[[:space:]]*)?(latest|v?[0-9]+(\.[0-9]+){0,2})$ ]] || fail 'goreleaser-version is latest, a version, or ~> and a version'
+          [[ "$RUNNER" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail 'runner is the name of a runner, such as ubuntu-latest'
+          [[ -z "$PLATFORM" || "$PLATFORM" =~ ^linux/(amd64|arm64)$ ]] || fail 'platform is linux/amd64 or linux/arm64'
+          [[ -z "$BUILD_IMAGE" || "$BUILD_IMAGE" =~ ^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$ ]] || fail 'build-image is a container image name, such as ghcr.io/example/builder:v1'
+          IFS=',' read -ra listed <<< "$SIBLINGS"
+          for item in "${listed[@]}"; do
+            item="${item//[[:space:]]/}"
+            [[ -z "$item" || "$item" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+(@[A-Za-z0-9._/-]+)?$ ]] || fail 'siblings are <owner>/<name> or <owner>/<name>@<ref>, comma-separated'
+          done
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/go-cli-results.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows go-cli-results.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Go CLI results::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The candidate, with no credentials left in the checkout: the repo's own code runs from here on.
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          path: caller
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: caller/${{ inputs.go-version-file }}
+          cache: false
+
+      - name: Install goreleaser
+        if: ${{ inputs.build-image == '' }}
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: ${{ inputs.goreleaser-version }}
+          install-only: true
+
+      # Public repos the build needs beside this one, cloned with no credential: none is in this job's environment for them.
+      - name: Clone the sibling repos
+        if: ${{ inputs.siblings != '' }}
+        shell: bash
+        env:
+          SIBLINGS: ${{ inputs.siblings }}
+        run: |
+          IFS=',' read -ra listed <<< "$SIBLINGS"
+          for item in "${listed[@]}"; do
+            item="${item//[[:space:]]/}"
+            [ -n "$item" ] || continue
+            repo="${item%%@*}"
+            ref=""
+            if [[ "$item" == *@* ]]; then ref="${item#*@}"; fi
+            git clone --depth 1 ${ref:+--branch "$ref"} "https://github.com/${repo}.git" "${repo#*/}"
+          done
+
+      # Each result is kept and never stops the job: the record turns a failure into HOLD.
+      - name: Test, build and smoke-test the candidate
+        id: run
+        shell: bash
+        working-directory: caller
+        env:
+          BINARY: ${{ inputs.binary }}
+          TEST_TARGET: ${{ inputs.test-target }}
+          MAKE_TARGET: ${{ inputs.make-target }}
+          CONFIG: ${{ inputs.goreleaser-config }}
+          BUILD_IMAGE: ${{ inputs.build-image }}
+          SIBLINGS: ${{ inputs.siblings }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          # In the build image, the repo and each sibling are mounted under /go/src, where its go.mod `replace` paths resolve.
+          goreleaser_run() {
+            if [ -z "$BUILD_IMAGE" ]; then goreleaser "$@"; return; fi
+            name="${GITHUB_REPOSITORY#*/}"
+            mounts=(-v "$PWD:/go/src/$name")
+            IFS=',' read -ra listed <<< "$SIBLINGS"
+            for item in "${listed[@]}"; do
+              item="${item//[[:space:]]/}"
+              [ -n "$item" ] || continue
+              repo="${item%%@*}"
+              mounts+=(-v "$(cd .. && pwd)/${repo#*/}:/go/src/${repo#*/}")
+            done
+            docker run --rm ${PLATFORM:+--platform="$PLATFORM"} -e CGO_ENABLED=1 -e GORELEASER_CURRENT_TAG "${mounts[@]}" -w "/go/src/$name" "$BUILD_IMAGE" "$@"
+          }
+          build=pass
+          # What the build and the tests need first (a UI build whose files the Go code embeds).
+          if [ -n "$MAKE_TARGET" ]; then make "$MAKE_TARGET" || build=fail; fi
+          tests=pass
+          if [ -n "$TEST_TARGET" ]; then make "$TEST_TARGET" || tests=fail; else go test ./... || tests=fail; fi
+          # A snapshot: the version a build would carry, nothing published, nothing signed.
+          if [ "$build" = pass ]; then goreleaser_run release --snapshot --clean --skip=publish,announce,sign --config "$CONFIG" || build=fail; fi
+          smoke=fail
+          if [ "$build" = pass ]; then
+            shopt -s nullglob
+            # The archive this runner can run.
+            case "$(uname -m)" in aarch64|arm64) arch=arm64 ;; *) arch=amd64 ;; esac
+            archives=(dist/*linux*"$arch"*.tar.gz)
+            if [ "${#archives[@]}" -eq 1 ]; then
+              mkdir -p "$RUNNER_TEMP/smoke"
+              tar -xzf "${archives[0]}" -C "$RUNNER_TEMP/smoke" && "$RUNNER_TEMP/smoke/$BINARY" --version && smoke=pass
+            fi
+          else
+            smoke=skip
+          fi
+          {
+            echo "tests=$tests"
+            echo "build=$build"
+            echo "smoke=$smoke"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Write results.json
+        shell: bash
+        env:
+          SOURCE: ${{ inputs.ref }}
+          TESTS: ${{ steps.run.outputs.tests }}
+          BUILD: ${{ steps.run.outputs.build }}
+          SMOKE: ${{ steps.run.outputs.smoke }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # A build that failed made no checksums: its result is `fail` and the digest is the commit's (docs/release-cli.md).
+          node shipyard/bin/shipyard cli-results --source "$SOURCE" --checksums caller/dist/checksums.txt \
+            --tests "tests=$TESTS" --steps "build=$BUILD,install smoke=$SMOKE" --url "$RUN_URL" --out "$RUNNER_TEMP/results/results.json"
+
+      - name: Upload the results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: results
+          path: ${{ runner.temp }}/results/results.json
+          if-no-files-found: error
+          retention-days: 14

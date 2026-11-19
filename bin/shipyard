@@ -26,6 +26,10 @@ const STEPS = {
   'private-data': () => require('../lib/private-data-command'),
   publish: () => require('../lib/publish-command'),
   'secret-scan': () => require('../lib/secret-scan-command'),
+  'release-version': () => require('../lib/release-version-command'),
+  homebrew: () => require('../lib/homebrew-command'),
+  'open-release-pr': () => require('../lib/open-release-pr-command'),
+  'cli-results': () => require('../lib/cli-results-command'),
 };
 
 async function main(argv) {

@@ -104,6 +104,61 @@
         }
       }
     },
+    "go-cli-results.yml": {
+      "inputs": [
+        "binary",
+        "ref"
+      ],
+      "secrets": [],
+      "jobs": {
+        "results": {
+          "contents": "read",
+          "id-token": "write"
+        }
+      }
+    },
+    "go-cli-ship.yml": {
+      "inputs": [
+        "automation-logins"
+      ],
+      "secrets": [],
+      "jobs": {
+        "ship": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        }
+      }
+    },
+    "homebrew.yml": {
+      "inputs": [
+        "automation-logins",
+        "desc",
+        "formula",
+        "homepage",
+        "tap"
+      ],
+      "secrets": [],
+      "jobs": {
+        "homebrew": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        }
+      }
+    },
+    "open-release-pr.yml": {
+      "inputs": [],
+      "secrets": [],
+      "jobs": {
+        "open": {
+          "actions": "write",
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "write"
+        }
+      }
+    },
     "prep.yml": {
       "inputs": [
         "prep"

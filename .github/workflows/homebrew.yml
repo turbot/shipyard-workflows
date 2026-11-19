@@ -1,0 +1,198 @@
+# The Homebrew step of a CLI's release (docs/release-cli.md): after the tag and its GitHub Release, writes the formula into the
+# tap from the Release's own files. The formula points at those files, so it comes last: a failed step leaves a tagged,
+# published Release, and running the job again finishes the formula (it writes the same text, or finds it written).
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit.
+#
+# The caller runs it as a job after `tag` has finished (needs: [ship, tag]), in its push-to-main workflow. Like tag.yml it runs in the caller's `release`
+# environment (docs/release-apps.md), which only main can use, and makes the release App's token there: for the tap alone, with
+# contents write. The App is installed on the tap too. Nothing here checks out the caller's repo or runs its code.
+
+name: Homebrew
+
+on:
+  workflow_call:
+    inputs:
+      automation-logins:
+        description: 'The accounts that open release PRs, comma-separated (the same as the tag job''s).'
+        type: string
+        required: true
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        default: v
+      tap:
+        description: The tap repo, as <owner>/<name>.
+        type: string
+        required: true
+      formula:
+        description: The formula's name, lower-case words joined by hyphens. It is written to Formula/<formula>.rb.
+        type: string
+        required: true
+      binary:
+        description: The name of the program in the archive. The formula's name when left empty.
+        type: string
+        default: ''
+      desc:
+        description: The formula's one-line description.
+        type: string
+        required: true
+      homepage:
+        description: The formula's homepage, an https address.
+        type: string
+        required: true
+      license:
+        description: The formula's license, an SPDX name. Left empty, the formula has no license line.
+        type: string
+        default: ''
+      versioned:
+        description: Also write Formula/<formula>@<version>.rb, the copy a person pins to, beside the newest formula.
+        type: boolean
+        default: false
+      archive:
+        description: 'The archive''s file name, with {os} (darwin, linux) and {arch} (amd64, arm64) where they go; {name} is the binary and {version} the version. Default: {name}_{os}_{arch}.tar.gz.'
+        type: string
+        default: ''
+      test-args:
+        description: The arguments the formula's test runs the program with, whose output must hold the version (--version). Left empty, the formula has no test block.
+        type: string
+        default: ''
+      branch:
+        description: The tap's branch to write. Its default branch when left empty.
+        type: string
+        default: ''
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: The release App's key, passed by name as the secret of the same name (docs/release-tag.md). Its value comes from the caller's release environment.
+        required: false
+
+permissions: {}
+
+jobs:
+  homebrew:
+    name: homebrew
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release    # the caller's: RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY (docs/release-apps.md)
+    permissions:
+      contents: read        # the merge commit, and this workflow's own commit
+      pull-requests: read   # the release PR the merge commit belongs to
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      # Before anything is read: the release environment's names are there, and the run is on main or main-<x.y>, the only
+      # branches the environment may let reach the key. Only whether the key is set reaches this step, never the key.
+      - name: Check the release environment
+        shell: bash
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          HAS_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+          TAP: ${{ inputs.tap }}
+        run: |
+          missing=()
+          [ -n "$CLIENT_ID" ] || missing+=("the variable RELEASE_APP_CLIENT_ID is not set in the release environment")
+          [ "$HAS_KEY" = "true" ] || missing+=("the secret RELEASE_APP_PRIVATE_KEY is not set in the release environment, or the caller does not pass it by name")
+          for m in "${missing[@]}"; do echo "::error title=Homebrew::${m}: set it up as docs/release-apps.md in turbot/shipyard says. Nothing was written"; done
+          [ "${#missing[@]}" -eq 0 ] || exit 1
+          if ! [[ "$GITHUB_REF" =~ ^refs/heads/main(-(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?)?$ ]]; then
+            echo "::error title=Homebrew::the release key is read only on main or main-<x.y>, and this run is on another ref. Nothing was written"
+            exit 1
+          fi
+          [[ "$TAP" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || { echo "::error title=Homebrew::tap is the tap repo, as <owner>/<name>"; exit 2; }
+
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/homebrew.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows homebrew.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Homebrew::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The tag of this merge, from its release PR. A push that is no release has no formula to write.
+      - name: Find the release
+        id: version
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+        run: node shipyard/bin/shipyard release-version --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS"
+
+      - name: Name the tap
+        id: tap
+        if: ${{ steps.version.outputs.release == 'true' }}
+        shell: bash
+        env:
+          TAP: ${{ inputs.tap }}
+        run: |
+          echo "owner=${TAP%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${TAP#*/}" >> "$GITHUB_OUTPUT"
+
+      # For the tap only, with only the permission the formula's write uses. The action revokes it when the job ends.
+      - name: Make the release App's token
+        id: app
+        if: ${{ steps.version.outputs.release == 'true' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.tap.outputs.owner }}
+          repositories: ${{ steps.tap.outputs.name }}
+          permission-contents: write
+
+      # Inputs reach the command as environment, never as shell text. GITHUB_TOKEN reads the Release; RELEASE_TOKEN writes the tap.
+      - name: Write the formula
+        if: ${{ steps.version.outputs.release == 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          TAP: ${{ inputs.tap }}
+          FORMULA: ${{ inputs.formula }}
+          BINARY: ${{ inputs.binary }}
+          DESC: ${{ inputs.desc }}
+          HOMEPAGE: ${{ inputs.homepage }}
+          LICENSE: ${{ inputs.license }}
+          VERSIONED: ${{ inputs.versioned }}
+          ARCHIVE: ${{ inputs.archive }}
+          TEST_ARGS: ${{ inputs.test-args }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          args=(--tag "$TAG" --tag-prefix "$TAG_PREFIX" --tap "$TAP" --formula "$FORMULA" --desc "$DESC" --homepage "$HOMEPAGE")
+          [ -n "$LICENSE" ] && args+=("--license=$LICENSE")
+          [ "$VERSIONED" = "true" ] && args+=(--versioned)
+          [ -n "$BINARY" ] && args+=("--binary=$BINARY")
+          [ -n "$ARCHIVE" ] && args+=("--archive=$ARCHIVE")
+          [ -n "$TEST_ARGS" ] && args+=("--test-args=$TEST_ARGS")
+          [ -n "$BRANCH" ] && args+=("--branch=$BRANCH")
+          node shipyard/bin/shipyard homebrew "${args[@]}"
