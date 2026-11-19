@@ -13,7 +13,10 @@
 #      token of the caller's GitHub App (and, for a production workflow, that workflow's run): a build that
 #      started after step 2 and reports success;
 #   4. sets the deployment to success with the site's address, or to failure when the build or the workflow
-#      failed, was not up within the wait, or could not be read.
+#      failed, was not up within the wait, could not be read, or the run was cancelled.
+#
+# The wait is at most 50 minutes (the default is 30): the Apps' tokens last an hour, so they always outlive it. A person
+# who cancels the run ends the deployment as a failure that says it was cancelled, never in progress.
 #
 # The caller grants `contents: read`, `deployments: write` (the merge commit's production deployment)
 # and `id-token: write` (learn which commit of this workflow is running). It writes no comment and edits
@@ -53,7 +56,7 @@ on:
         type: string
         required: true
       wait:
-        description: How many minutes (1 to 60) to wait for the site's production build.
+        description: How many minutes (1 to 50) to wait for the site's production build. A longer wait is refused.
         type: string
         default: '30'
     secrets:
@@ -97,7 +100,7 @@ jobs:
           [[ -z "$PRODUCTION_WORKFLOW" || "$PRODUCTION_WORKFLOW" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] || fail 'production-workflow must be a workflow file name'
           [[ "$HAS_HOOK" == true || -n "$PRODUCTION_WORKFLOW" ]] || fail 'nothing to publish: pass the deploy-hook secret, or a production-workflow'
           [[ "$APP_CLIENT_ID" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || fail 'app-client-id must be the client ID of the GitHub App'
-          [[ "$WAIT" =~ ^[0-9]{1,2}$ && "$WAIT" -ge 1 && "$WAIT" -le 60 ]] || fail 'wait is a number of minutes, from 1 to 60'
+          [[ "$WAIT" =~ ^[0-9]{1,2}$ && "$WAIT" -ge 1 && "$WAIT" -le 50 ]] || fail 'wait is a number of minutes, from 1 to 50: the App tokens last an hour'
 
       # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
       # workflow, which is the commit of shipyard to run.
@@ -182,4 +185,5 @@ jobs:
           [[ -z "$SEARCH_WORKFLOW" ]] || args+=(--search-workflow="$SEARCH_WORKFLOW")
           [[ -z "$PRODUCTION_WORKFLOW" ]] || args+=(--production-workflow="$PRODUCTION_WORKFLOW")
           [[ -z "$PRODUCTION_INPUTS" ]] || args+=(--production-inputs="$PRODUCTION_INPUTS")
-          node shipyard/bin/shipyard docs-publish "${args[@]}"
+          # exec: the runner's cancel signal goes straight to the step, which then ends the deployment as a failure.
+          exec node shipyard/bin/shipyard docs-publish "${args[@]}"
