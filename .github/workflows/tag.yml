@@ -60,7 +60,7 @@ on:
         type: boolean
         default: false
       merge-back:
-        description: After the tag, open a PR from the release branch into the work branch the candidate was cut from, and merge it with a merge commit once its checks pass. The release App then needs pull requests and contents write, and checks and commit statuses read.
+        description: After the tag, open a PR from the release branch into the work branch the candidate was cut from, and merge it with a merge commit once the work branch's required checks pass. The release App then needs pull requests and contents write, and checks and commit statuses read.
         type: boolean
         default: true
       product:

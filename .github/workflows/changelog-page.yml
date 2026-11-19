@@ -1,0 +1,154 @@
+# The changelog page of a release (docs/release-announce.md): after the tag and its GitHub Release, writes the page into the
+# product's site repo from the release notes the approver saw, as a PR the release bot merges. A failed job leaves a tagged,
+# published Release, and running the job again finishes the page (it reads what an earlier run did before it writes, so it
+# opens no second PR and writes no second page).
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit.
+#
+# The caller runs it as a job after `tag` has finished (needs: [ship, tag]), in its push-to-main workflow, beside Homebrew. Like
+# tag.yml it runs in the caller's `release` environment (docs/release-apps.md), which only main can use, and makes the area's
+# release App token there: for the one site repo alone, with contents and pull requests write. The App is installed on the site
+# repo too. Nothing here checks out the caller's repo or runs its code; the release PR, the notes and `.github/release.json` are read
+# from GitHub at the merge commit, and their text is data.
+
+name: Changelog page
+
+on:
+  workflow_call:
+    inputs:
+      automation-logins:
+        description: 'The accounts that open release PRs, comma-separated (the same as the tag job''s).'
+        type: string
+        required: true
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        default: v
+      page-targets:
+        description: 'Where a page may go, comma-separated <owner>/<name>:<folder>/ entries, such as example-org/example-site:content/changelog/. A page for another repo, or outside the folder, is refused, whatever .github/release.json says.'
+        type: string
+        required: true
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: The release App's key, passed by name as the secret of the same name (docs/release-tag.md). Its value comes from the caller's release environment.
+        required: false
+
+permissions: {}
+
+jobs:
+  page:
+    name: page
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release    # the caller's: RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY (docs/release-apps.md)
+    permissions:
+      contents: read        # the release notes and the config at the merge commit, and this workflow's own commit
+      pull-requests: read   # the release PR the merge commit belongs to
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      # Before anything is read: the release environment's names are there, and the run is on main or main-<x.y>, the only
+      # branches the environment may let reach the key. Only whether the key is set reaches this step, never the key.
+      - name: Check the release environment
+        shell: bash
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          HAS_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+        run: |
+          missing=()
+          [ -n "$CLIENT_ID" ] || missing+=("the variable RELEASE_APP_CLIENT_ID is not set in the release environment")
+          [ "$HAS_KEY" = "true" ] || missing+=("the secret RELEASE_APP_PRIVATE_KEY is not set in the release environment, or the caller does not pass it by name")
+          for m in "${missing[@]}"; do echo "::error title=Changelog page::${m}: set it up as docs/release-apps.md in turbot/shipyard says. Nothing was written"; done
+          [ "${#missing[@]}" -eq 0 ] || exit 1
+          if ! [[ "$GITHUB_REF" =~ ^refs/heads/main(-(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?)?$ ]]; then
+            echo "::error title=Changelog page::the release key is read only on main or main-<x.y>, and this run is on another ref. Nothing was written"
+            exit 1
+          fi
+          [ -n "${AUTOMATION_LOGINS//[[:space:],]/}" ] || { echo "::error title=Changelog page::automation-logins names no account: name the accounts that open release PRs"; exit 1; }
+
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/changelog-page.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows changelog-page.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Changelog page::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The tag of this merge, from its release PR. A push that is no release has no page to write.
+      - name: Find the release
+        id: version
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+        run: node shipyard/bin/shipyard release-version --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS"
+
+      # Every refusal is made here, before a token exists: no published Release, no page setting, no release notes, a site repo or
+      # a folder the caller did not list. It writes nothing, and says which site repo the page goes to.
+      - name: Find where the page goes
+        id: where
+        if: ${{ steps.version.outputs.release == 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          PAGE_TARGETS: ${{ inputs.page-targets }}
+        run: node shipyard/bin/shipyard changelog-page --resolve --tag "$TAG" --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --page-targets "$PAGE_TARGETS"
+
+      # For the site repo only, with only the permissions the page's write uses. The action revokes it when the job ends.
+      - name: Make the release App's token
+        id: app
+        if: ${{ steps.where.outputs.page == 'true' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.where.outputs.site-owner }}
+          repositories: ${{ steps.where.outputs.site-name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # Inputs reach the command as environment, never as shell text. GITHUB_TOKEN reads the product repo; RELEASE_TOKEN writes the site repo.
+      - name: Write the page
+        if: ${{ steps.where.outputs.page == 'true' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          PAGE_TARGETS: ${{ inputs.page-targets }}
+        run: node shipyard/bin/shipyard changelog-page --tag "$TAG" --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --page-targets "$PAGE_TARGETS"

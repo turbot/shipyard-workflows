@@ -1,17 +1,17 @@
-# What follows a release tag: the changelog page on the product's site repo (merged by the release
-# bot), the #releases line for a product with no page, and a "Live in" comment on each issue the
-# release closes, then closes the caller's open prep jobs the release shipped (a failure there is a
-# warning, never a failed run; no permission beyond the issues: write below). docs/release-announce.md says how a repo calls it.
+# What follows a release tag: the #releases line for a product with no page, and a "Live in" comment on
+# each issue the release closes, then closes the caller's open prep jobs the release shipped (a failure
+# there is a warning, never a failed run; no permission beyond the issues: write below). The changelog
+# page is not here: it is written by changelog-page.yml, a job in the merge's own run, which can use the
+# release App's key that this run, started by the tag's push, cannot reach. docs/release-announce.md says how a repo calls both.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
 # `v<major>` (`v0`), the tag each release moves to its own commit, from a `push` of tags (the release App's tag starts it) or by hand with the tag to run again.
 #
 # Nothing here checks out the caller's repo or runs its code: GitHub is asked for the tag, the
-# release PR, the notes and the facts, and their text is data. The page token and the Slack token
-# are each in the environment of one step alone, and a step that fails never stops the next:
-# an output that fails files a Bug in the caller's repo and the job goes on, so the release is
-# never failed by what follows it.
+# release PR, the notes and the facts, and their text is data. The Slack token is in the environment
+# of one step alone, and a step that fails never stops the next: an output that fails files a Bug in
+# the caller's repo and the job goes on, so the release is never failed by what follows it.
 
 name: Announce
 
@@ -30,18 +30,11 @@ on:
         description: 'The accounts that open release PRs, comma-separated. Required: a merged release/ PR from any other account is never announced.'
         type: string
         required: true
-      page-targets:
-        description: 'Where a page may go, comma-separated <owner>/<name>:<folder>/ entries, such as example-org/example-site:content/changelog/. A page for another repo, or outside the folder, is refused, whatever .github/release.json says.'
-        type: string
-        default: ''
       slack-channel:
         description: The channel the #releases line is posted in.
         type: string
         default: '#releases'
     secrets:
-      page-token:
-        description: The release bot's token for the site repo (contents and pull requests write). Only the page step sees it.
-        required: false
       slack-token:
         description: The release bot's Slack token (chat:write). Only the post step sees it.
         required: false
@@ -72,7 +65,6 @@ jobs:
       TAG: ${{ inputs.tag }}
       TAG_PREFIX: ${{ inputs.tag-prefix }}
       AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
-      PAGE_TARGETS: ${{ inputs.page-targets }}
       SLACK_CHANNEL: ${{ inputs.slack-channel }}
     steps:
       - name: Find this workflow's commit
@@ -114,14 +106,6 @@ jobs:
           persist-credentials: false
 
       # Inputs reach the command as environment, never as shell text.
-      - name: Make the changelog page
-        shell: bash
-        env:
-          PAGE_TOKEN: ${{ secrets.page-token }}
-        run: |
-          [ -n "${AUTOMATION_LOGINS//[[:space:],]/}" ] || { echo "::error::automation-logins names no account: name the accounts that open release PRs"; exit 1; }
-          node shipyard/bin/shipyard announce --output page --tag "$TAG" --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --page-targets "$PAGE_TARGETS"
-
       - name: Post the #releases line
         if: ${{ !cancelled() && steps.shipyard.outcome == 'success' }}
         shell: bash

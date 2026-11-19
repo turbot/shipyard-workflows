@@ -39,6 +39,20 @@
         }
       }
     },
+    "changelog-page.yml": {
+      "inputs": [
+        "automation-logins",
+        "page-targets"
+      ],
+      "secrets": [],
+      "jobs": {
+        "page": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        }
+      }
+    },
     "cut.yml": {
       "inputs": [
         "commit"
@@ -166,6 +180,29 @@
       "secrets": [],
       "jobs": {
         "prep": {}
+      }
+    },
+    "prerelease.yml": {
+      "inputs": [
+        "approvers",
+        "commit",
+        "pre",
+        "step",
+        "version"
+      ],
+      "secrets": [
+        "org-token"
+      ],
+      "jobs": {
+        "publish": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
+        "start": {
+          "contents": "read",
+          "id-token": "write"
+        }
       }
     },
     "record.yml": {
