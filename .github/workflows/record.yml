@@ -2,6 +2,12 @@
 # smoke step or a check did not pass. It commits nothing: the release PR's head stays the commit the cut
 # made, and the results stay in the release run's `results` artifact, which the page links.
 #
+# Both jobs hold `contents: write` although nothing is committed: GitHub refuses
+# `markPullRequestReadyForReview` (and `convertPullRequestToDraft`) to an Actions token without it, so
+# a record that says SHIP could not take the release PR out of draft, and the ask refused the draft.
+# A called job's own grant caps the token, so a caller cannot make up for it. `workflows/contract.json`
+# and the tests keep it.
+#
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
 # `v<major>` (`v0`), the tag each release moves to its own commit. See the README for the caller.
@@ -114,7 +120,7 @@ jobs:
       group: shipyard-record-${{ github.repository }}-${{ inputs.pr }}
       cancel-in-progress: false
     permissions:
-      contents: read         # the candidate's history; the record commits nothing
+      contents: write        # for marking the release PR ready for review (and back to a draft), which GitHub refuses a token without it; the record commits nothing and moves no branch
       pull-requests: write   # write the record into the PR body
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
@@ -567,7 +573,7 @@ jobs:
       group: shipyard-record-review-${{ github.repository }}-${{ inputs.pr }}
       cancel-in-progress: false
     permissions:
-      contents: read         # the candidate's history; this job cannot push
+      contents: write        # kept equal to the record job's (a caller grants one set to both); this job commits nothing, pushes nothing and leaves the PR's draft state as it is
       pull-requests: write   # write the record into the PR body
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
