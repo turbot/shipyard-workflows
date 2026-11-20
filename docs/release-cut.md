@@ -51,14 +51,14 @@ A PR is a commit on the first-parent line of the range whose subject ends `(#12)
 | `mergeBacks[]` | The merged PRs of the range that only merge a release branch back into a work branch: `number`, `title`, `url`, `mergedAt`, `commit`, `from` (the release branch) and `into` (the work branch). Not in `prs[]`, never counted as a change. |
 | `unattributed[]` | The commits of the range with no merged PR: `sha`, `subject`, `why`. |
 | `breaking[]` | The breaking signs of the repo's detector: `id` and `why`. |
-| `callerNeeds[]` | Only when the repo keeps a `workflows/contract.json` at `--to`: what its published workflows ask of callers now that they did not at the range's start, each as `workflow`, `kind`, `name` and, for a permission, `job`, `from` and `to`. Not written for a first release. `lint-prep` refuses a level below major while it holds anything ([prep-file.md](prep-file.md#what-callers-must-give)). |
+| `callerNeeds[]` | Only when the repo keeps a `workflows/contract.json` at `--to`: what its published workflows ask of callers now that they did not at the range's start, each as `workflow`, `kind`, `name` and, for a permission, `job`, `from` and `to`. Not written for a first release. Each raise is also a read-first flag. `lint-prep` refuses a level below major while a raise's flag has no answer ([prep-file.md](prep-file.md#what-callers-must-give)). |
 | `flags[]` | The read-first flags: `id` and `why`. The prep run answers each one (`level.flags`). |
 | `internalTerms` | `notes.internalTerms` of the repo's `.github/release.json`. |
 | `publicRepos`, `privateHosts` | Optional, read by `lint-prep` ([prep-file.md](prep-file.md)). `facts` does not write them; a person adds them to the file when the release notes link to other repos or hosts. |
 
 `.github/release.json` is read at `--to`, never from the working tree.
 
-The read-first flags, each with an id that names its PR or sign: `breaking-<sign>` for each of the detector's signs, `dependency-bump-<n>`, `update-needs-<n>`, `no-changelog-line-<n>` (a PR that ships something and has no single line), `changes-requested-<n>` (merged with a review still asking for changes) and `commit-without-pr-<sha7>`.
+The read-first flags, each with an id that names its PR or sign: `breaking-<sign>` for each of the detector's signs, `dependency-bump-<n>`, `update-needs-<n>`, `no-changelog-line-<n>` (a PR that ships something and has no single line), `changes-requested-<n>` (merged with a review still asking for changes) and `commit-without-pr-<sha7>`, and `caller-needs-<workflow>-<kind>-<name>` for each need a published workflow now raises for its callers (a major needs no answer; a minor or patch answers it with every caller checked).
 
 ### The breaking-change detector
 

@@ -85,16 +85,18 @@ A short file:
 
 ## What callers must give
 
-A release of Shipyard cannot make a published workflow need more from its callers without a new major version. Once every repo calls the floating major tag (`@v0`), a minor or patch release that needs more would break every repo's runs at the moment the tag moves. GitHub checks every job of a called workflow against what the caller grants, a skipped job too, so one new job that asks for `pull-requests: write` fails each caller that grants `read`.
+A release of Shipyard cannot make a published workflow need more from its callers without a new major version, unless the release manager has checked every caller and the prep file says so. Once every repo calls the floating major tag (`@v0`), a minor or patch release that needs more would break the runs of any caller that does not grant it at the moment the tag moves. GitHub checks every job of a called workflow against what the caller grants, a skipped job too, so one new job that asks for `pull-requests: write` fails each caller that grants `read`.
 
 **The contract file.** `workflows/contract.json` records, for each published workflow, the permissions each job asks for, the inputs it requires (`required: true` with no default) and the secrets it requires. It is published with the workflows and made from `workflows/*.yml` alone: `node bin/shipyard contract` writes it, and `node bin/shipyard contract --check` exits 1 when the committed file differs. A test runs the same check, so a PR that changes what callers must give always shows it as a diff of this file.
 
-**The release check.** `shipyard facts` reads the workflows as the range's first commit and its last hold them, and lists in `callerNeeds` what rose:
+**The release check.** `shipyard facts` reads the workflows as the range's first commit and its last hold them, lists in `callerNeeds` what rose, and raises a read-first flag for each raise:
 
 - a job's permission rises from none to read or write, or from read to write, past the most any job of that workflow asked before (a caller grants a permission to the whole workflow, so a new job asking for what another job already needed raises nothing);
 - a workflow requires an input or a secret it did not require before.
 
-`lint-prep` (and so the cut, which runs the same lint) refuses a prep file whose `level.bump` is `minor` or `patch` while `callerNeeds` is not empty, with `caller-needs-raised`. The refusal names the workflow, the job and what rose. A `major` level passes. Below 1.0 that is a new line, 0.x to 1.0.0, not a minor: the rule that a breaking change is a minor in version 0.x does not cover this. Lowering a need, adding an optional input or secret, adding a new workflow, and removing a workflow raise nothing. A first release raises nothing either, as its range starts at an old tag.
+The flag's id is `caller-needs-<workflow>-<kind>-<name>`, with the job after the kind for a permission (`caller-needs-record.yml-permission-record-contents`). It is answered in `level.flags` like any other, and **the answer must name every caller checked and what each grants**: an org code search for the workflow at the floating tag (`@v0`), each repo it found, and for each, that it grants the permission (or passes the input or secret). A caller the search found and the answer leaves out, or a caller that does not grant it, means the answer is not true and the level is `major`.
+
+`lint-prep` (and so the cut, which runs the same lint) refuses a prep file whose `level.bump` is `minor` or `patch` while a raise's flag has no answer, with `caller-needs-raised`. The refusal names the workflow, the job and what rose. With the flag answered, a `minor` or `patch` passes. A `major` level passes with no answer. Below 1.0 that is a new line, 0.x to 1.0.0, not a minor: the rule that a breaking change is a minor in version 0.x does not cover this. Lowering a need, adding an optional input or secret, adding a new workflow, and removing a workflow raise nothing, and have no flag. A first release raises nothing either, as its range starts at an old tag.
 
 **How to add a feature without a major.** Put a job that needs more in a new published workflow that callers add when they want it, instead of a new job in one they already call. That keeps `@v0` working for every repo that does not opt in.
 
@@ -107,7 +109,7 @@ A release of Shipyard cannot make a published workflow need more from its caller
 | `repo.name` | The product repo, `<owner>/<name>`. |
 | `repo.private` | `true` or `false`. A link into the product repo is private when the repo is. |
 | `prs[].number` | Each PR in the range. |
-| `flags[].id` | Each read-first flag. |
+| `flags[].id` | Each read-first flag. A raised caller need has one, `caller-needs-<workflow>-<kind>-<name>` (see [What callers must give](#what-callers-must-give)). |
 | `product` | Optional. The product's display name, `product` in its `.github/release.json`. |
 | `audience` | Optional. Whom the release is for, `audience` in its `.github/release.json`: `visitors`, `customers` or `repos`. The page's What changes heading names them. |
 | `profile` | Optional. `light` when its `.github/release.json` says `"profile": "light"` ([Light releases](how-we-release.md#light-releases)): the release has no prep file, and the facts are all its page and its GitHub Release are made from. Absent for a full release. |
@@ -135,7 +137,7 @@ A release of Shipyard cannot make a published workflow need more from its caller
 - a PR in the range is in no group (`pr-in-no-group`), or in two (`pr-in-two-groups`);
 - a PR that ships something (`shipsNothing` is not `true`) has no single valid Changelog line in the facts, in any group, `Internal` too (`pr-no-changelog-line`). The cut refuses it the same way, as it never writes a line. The fix is on the PR (give it one line) and the facts are made again: answering its `no-changelog-line-<n>` flag does not clear it;
 - a group holds a PR that is not in the range (`group-not-in-range`);
-- the facts' `callerNeeds` is not empty and `level.bump` is `minor` or `patch` (`caller-needs-raised`): the problem names the workflow, the job and what rose. Only `major` passes, below 1.0 too (see [What callers must give](#what-callers-must-give));
+- the facts' `callerNeeds` is not empty, `level.bump` is `minor` or `patch` and a raise's flag has no answer (`caller-needs-raised`): the problem names the workflow, the job and what rose. A `major` passes with no answer, below 1.0 too (see [What callers must give](#what-callers-must-give));
 - a flag in the facts has no answer (`flag-unanswered`), an answer names a flag the facts do not raise (`flag-not-in-facts`), or a flag is answered twice (`flag-answered-twice`);
 - the file is format 1 (`format-1`), refused alone with a message that says what format 2 holds;
 - a `covers` entry, of a release-notes item or a report change, is not a PR in the range (`covers-not-in-range`);
