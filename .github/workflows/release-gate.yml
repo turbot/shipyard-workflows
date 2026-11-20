@@ -1,0 +1,258 @@
+# The release gate: the one source of a release PR's `shipyard/release` check (docs/release-gate.md). It counts the
+# release PR's verdict again, the way the record does for a review, and posts it on the PR's head as a check run with the
+# area's release App's token. `main`'s rule requires `shipyard/release` pinned to that App, so a status, a check run or a
+# workflow of any other writer, on a pushed branch or with a token, leaves the check unmet.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit.
+#
+# Why a workflow on `main`: the release App's key is in the caller's `release` environment, which only `main` can use, and
+# the record runs on the release PR's branch, where the key cannot be read. So the record, which sets `gate-workflow`,
+# starts the caller's gate by `workflow_dispatch` on `main` with the PR's number once it has written the page
+# (the job's own token may start a workflow that way, and no other). The caller is one file on `main`:
+#
+#   on: { workflow_dispatch: { inputs: { pr: { required: true } } } }
+#   jobs: { gate: { uses: .../release-gate.yml@v0, with: { pr: ${{ inputs.pr }} }, secrets: { RELEASE_APP_PRIVATE_KEY: ... } } }
+#
+# The caller fixes, in its own `with:`, the settings that change the count (`ignore-checks`, `fleet-logins`, ...), each equal to the record
+# caller's. They are on `main` on purpose: the record caller is a file a pushed branch can change, so a setting that could make a
+# check ignored must not come from it, and the dispatch carries the PR's number alone.
+#
+# The gate trusts nothing the record wrote but the number of the release run its page names, and checks that run is this
+# release's before reading it (as a review does). Everything else it counts itself from GitHub: the release PR's body (the
+# release data, checked against the cut commit's digest), its reviews and the checks of its head. The candidate is checked
+# out as data and never run: shipyard runs from the published copy, at the commit of this workflow. The App's token is made
+# last, for this repo alone with `checks: write` only, and reaches the one step that posts the check; the steps that read the
+# candidate hold only the job's own token.
+#
+# A verdict is `success` only for SHIP with an approval of the PR's head seen by the record's own reading and nothing else
+# open; `in_progress` (the check stays unmet) while a step is open or the approval is not there yet; `failure` for HOLD, and
+# for a page that names no release run. A push moves the head, and the new head has no check until its own gate posts one.
+
+name: Release gate
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: The release PR's number.
+        type: string
+        required: true
+      ignore-checks:
+        description: Comma-separated names of checks the gate does not judge. The same as the record workflow's.
+        type: string
+        required: false
+        default: ''
+      fleet-logins:
+        description: Comma-separated logins that are the fleet and never count as an independent approval, besides every bot account. The same as the record workflow's.
+        type: string
+        required: false
+        default: ''
+      armed-label:
+        description: The label whose author counts as having driven a change. The same as the record workflow's.
+        type: string
+        required: false
+        default: agent:ready
+      changelog:
+        description: The product's changelog, relative to the repo. The same as the record workflow's.
+        type: string
+        required: false
+        default: CHANGELOG.md
+      ask-workflow:
+        description: The file name of this repo's ask workflow, if the record's caller sets one (the gate leaves a run of it out of the checks, as the record does).
+        type: string
+        required: false
+        default: ''
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: The release App's key, passed by name as the secret of the same name (docs/release-gate.md). Its value comes from the caller's release environment.
+        required: false
+
+permissions: {}
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # One gate per release PR at a time: the one that runs last counts last, so an older pass never posts over a newer one.
+    concurrency:
+      group: shipyard-release-gate-${{ github.repository }}-${{ inputs.pr }}
+      cancel-in-progress: false
+    environment: release    # the caller's: RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY (docs/release-apps.md)
+    permissions:
+      contents: read         # check out the candidate as data, and this workflow's own commit
+      pull-requests: read    # the release PR and its reviews
+      issues: read           # who wrote and armed each change's issue
+      checks: read           # the candidate's check runs
+      statuses: read         # the candidate's commit statuses
+      actions: read          # the release run and its `results` artifact; the event of each check run's workflow run
+      id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
+    env:
+      PR: ${{ inputs.pr }}
+      IGNORE_CHECKS: ${{ inputs.ignore-checks }}
+      FLEET_LOGINS: ${{ inputs.fleet-logins }}
+      ARMED_LABEL: ${{ inputs.armed-label }}
+      CHANGELOG: ${{ inputs.changelog }}
+      ASK_WORKFLOW: ${{ inputs.ask-workflow }}
+    steps:
+      # Before anything is read: the release environment's names are there, and the run is on main, the only branch the
+      # environment lets reach the key. Only whether the key is set reaches this step, never the key.
+      - name: Check the release environment
+        shell: bash
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          HAS_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          fail() { echo "::error title=Release gate::$1"; exit 2; }
+          missing=()
+          [ -n "$CLIENT_ID" ] || missing+=("the variable RELEASE_APP_CLIENT_ID is not set in the release environment")
+          [ "$HAS_KEY" = "true" ] || missing+=("the secret RELEASE_APP_PRIVATE_KEY is not set in the release environment, or the caller does not pass it by name")
+          for m in "${missing[@]}"; do echo "::error title=Release gate::${m}: set it up as docs/release-apps.md in turbot/shipyard says. Nothing was posted"; done
+          [ "${#missing[@]}" -eq 0 ] || exit 1
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error title=Release gate::the release key is read only on main, and this run is on another ref. Nothing was posted"
+            exit 1
+          fi
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || fail 'pr must be the release PR'"'"'s number'
+          [[ "$CHANGELOG" =~ ^[A-Za-z0-9._/-]+$ && "$CHANGELOG" != -* && "$CHANGELOG" != *..* && "$CHANGELOG" != /* ]] || fail 'changelog must be a path inside the repo'
+          [[ -z "$ASK_WORKFLOW" || "$ASK_WORKFLOW" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]] || fail 'ask-workflow must be the file name of a workflow in .github/workflows (ask.yml)'
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/release-gate.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows release-gate.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Release gate::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      - name: Find the release PR's branch
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pull=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '[.head.ref, .head.repo.full_name, .state] | @tsv')
+          IFS=$'\t' read -r branch head_repo state <<< "$pull"
+          if [[ ! "$branch" =~ ^release/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error title=Release gate::#$PR does not come from a release/X.Y.Z branch, so it is not a release PR"
+            exit 1
+          fi
+          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+          if [[ "$(lower "$head_repo")" != "$(lower "$GITHUB_REPOSITORY")" ]]; then
+            echo "::error title=Release gate::#$PR comes from another repo ($head_repo), not a candidate of this one"
+            exit 1
+          fi
+          if [[ "$state" != "open" ]]; then
+            echo "::error title=Release gate::#$PR is $state: the gate counts an open candidate"
+            exit 1
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      # The candidate as the PR has it now, with its history and tags, as data. No credentials stay in the checkout, and nothing in it is run.
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+          path: caller
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      # The release run the record on the page names (`<!-- shipyard:release-run <id> -->`), or none. Whether it is this
+      # release's is checked when the gate reads it, below.
+      - name: Find the release run the record names
+        id: run
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          node shipyard/bin/shipyard record --find-release-run --pr "$PR" --out "$RUNNER_TEMP/release-run"
+          run=$(cat "$RUNNER_TEMP/release-run")
+          [[ -z "$run" || "$run" =~ ^[1-9][0-9]*$ ]] || { echo "::error title=Release gate::the release run the record names is not a run id"; exit 2; }
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      # An artifact that has expired, or that the run never made, downloads nothing: the gate then says HOLD and why.
+      - name: Get the release run's results
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ steps.run.outputs.run }}
+        run: |
+          if [[ -z "$RUN" ]]; then
+            echo 'The record names no release run: the gate says HOLD.'
+            exit 0
+          fi
+          if ! gh run download "$RUN" --repo "$GITHUB_REPOSITORY" --name results --dir "$RUNNER_TEMP/results"; then
+            echo "::warning title=Release gate::the artifact 'results' of run $RUN could not be downloaded: the gate says why"
+          fi
+
+      - name: Name this repo for the token
+        id: repo
+        shell: bash
+        run: echo "name=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      # Made last, for this repo alone, with the one permission the check needs. The action revokes it when the job ends.
+      - name: Make the release App's token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+          permission-checks: write
+
+      # Inputs reach the command as environment, never as shell text. GITHUB_TOKEN reads; RELEASE_TOKEN posts the one check run.
+      - name: Post shipyard/release
+        shell: bash
+        env:
+          SHIPYARD_SHA: ${{ steps.self.outputs.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.app.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN: ${{ steps.run.outputs.run }}
+        run: |
+          args=()
+          # The caller's own file name (`.github/workflows/release-gate.yml`), from this run's workflow ref: its run is left out of the checks.
+          gate_file=${GITHUB_WORKFLOW_REF%%@*}
+          gate_file=${gate_file##*/}
+          if [[ "$gate_file" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]]; then args+=(--gate-workflow "$gate_file"); fi
+          if [[ -n "$SHIPYARD_SHA" ]]; then args+=(--shipyard-sha "$SHIPYARD_SHA"); fi
+          if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
+          if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
+          if [[ -n "$ASK_WORKFLOW" ]]; then args+=(--ask-workflow "$ASK_WORKFLOW"); fi
+          if [[ -n "$RUN" ]]; then args+=(--release-run "$RUN"); fi
+          node shipyard/bin/shipyard release-gate --pr "$PR" --results "$RUNNER_TEMP/results/results.json" \
+            --dir caller --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"

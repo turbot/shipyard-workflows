@@ -23,7 +23,7 @@
 # --update`), and writes HOLD naming what failed otherwise. A page that names no run (a release PR
 # recorded before the record stopped committing) is read from the evidence its head holds
 # (`shipyard record --from-evidence --update`), or HOLD with the reason. The review commits nothing,
-# runs no check again, and its one other write is the `shipyard/release` status below.
+# runs no check again, and its one other write is the `shipyard/release` status below (or, where `gate-workflow` is set, the start of the release gate, which posts it).
 # The release PR is a draft until the record has written a SHIP at its head, so an approval is not
 # asked for before the checks have run. The first pass makes the PR a draft (`--draft-until-ship`),
 # so a push to the candidate makes it one again; the pass that writes the body marks it ready on
@@ -54,6 +54,7 @@
 # started by `workflow_run` of this record, never runs. With `ask-workflow` set, the record starts the
 # ask itself once the body says SHIP (below), by `workflow_dispatch` on the default branch with the PR's number.
 #
+# Where `gate-workflow` is set the record sets no status and starts the release gate instead (docs/release-gate.md); this paragraph is for a repo that does not.
 # The same step that writes the body sets one commit status, `shipyard/release`, on the PR's head,
 # from the verdict the body shows: success for SHIP
 # approved at that head with nothing else open, pending for SHIP with a step still open (a check still
@@ -111,6 +112,11 @@ on:
         type: string
         required: false
         default: ''
+      gate-workflow:
+        description: The file name of this repo's release gate workflow (in .github/workflows), such as `release-gate.yml`. It must accept `workflow_dispatch` with an input `pr`, and call `release-gate.yml` of this repo's shipyard (docs/release-gate.md). When it is set, the record sets no `shipyard/release` commit status, and once it has written the page it starts the gate on `main` with the PR's number, and the gate posts `shipyard/release` as a check run with the area's release App, the one source `main` accepts. Left empty, the record sets the status itself, as before.
+        type: string
+        required: false
+        default: ''
       required-check-workflows:
         description: Comma-separated file names of this repo's workflows (in .github/workflows) that make the checks the base branch's rules require, such as `ci.yml`. Each must accept `workflow_dispatch`. Each is run on the release branch, so its checks land on the PR's head.
         type: string
@@ -147,6 +153,7 @@ jobs:
       WAIT_MINUTES: ${{ inputs.check-wait-minutes }}
       CHECK_WORKFLOWS: ${{ inputs.required-check-workflows }}
       ASK_WORKFLOW: ${{ inputs.ask-workflow }}
+      GATE_WORKFLOW: ${{ inputs.gate-workflow }}
     steps:
       - name: Check the inputs
         shell: bash
@@ -157,6 +164,7 @@ jobs:
           [[ "$CHANGELOG" =~ ^[A-Za-z0-9._/-]+$ && "$CHANGELOG" != -* && "$CHANGELOG" != *..* && "$CHANGELOG" != /* ]] || fail 'changelog must be a path inside the repo'
           [[ "$WAIT_MINUTES" =~ ^[0-9]+$ ]] && (( WAIT_MINUTES <= 60 )) || fail 'check-wait-minutes must be a whole number from 0 to 60'
           [[ -z "$ASK_WORKFLOW" || "$ASK_WORKFLOW" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]] || fail 'ask-workflow must be the file name of a workflow in .github/workflows (ask.yml)'
+          [[ -z "$GATE_WORKFLOW" || "$GATE_WORKFLOW" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]] || fail 'gate-workflow must be the file name of a workflow in .github/workflows (release-gate.yml)'
           IFS=$', \t' read -ra listed <<< "$(printf '%s' "$CHECK_WORKFLOWS" | tr '\n' ',')"
           for w in "${listed[@]}"; do
             if [[ -n "$w" && ! "$w" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]]; then
@@ -257,6 +265,7 @@ jobs:
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
           if [[ -n "$ASK_WORKFLOW" ]]; then args+=(--ask-workflow "$ASK_WORKFLOW"); fi
+          if [[ -n "$GATE_WORKFLOW" ]]; then args+=(--gate-workflow "$GATE_WORKFLOW"); fi
           node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
 
@@ -348,6 +357,7 @@ jobs:
                   | .check_runs[] | select(.status != "completed")
                   | select(((.details_url // "") | contains("/actions/runs/" + $run + "/")) | not)
                   | select(.name as $n | ($skip | index($n)) | not)
+                  | select(.name != "shipyard/release")
                   | .name'
           }
           deadline=$((SECONDS + 60 * WAIT_MINUTES))
@@ -567,6 +577,7 @@ jobs:
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
           if [[ -n "$ASK_WORKFLOW" ]]; then args+=(--ask-workflow "$ASK_WORKFLOW"); fi
+          if [[ -n "$GATE_WORKFLOW" ]]; then args+=(--gate-workflow "$GATE_WORKFLOW"); fi
           node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}" \
             | tee "$RUNNER_TEMP/record.log"
@@ -645,8 +656,8 @@ jobs:
       pull-requests: write   # write the record into the PR body
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
-      actions: read          # the release run and its `results` artifact; the event of each check run's workflow run (a Dependabot or scheduled run is not judged)
-      statuses: write        # read its commit statuses, and set `shipyard/release` on the head (the one write this job makes besides the body)
+      actions: write         # the release run and its `results` artifact; the event of each check run's workflow run (a Dependabot or scheduled run is not judged); start the release gate on `main` (`gate-workflow`)
+      statuses: write        # read its commit statuses, and set `shipyard/release` on the head (the one write this job makes besides the body, and the start of the gate where `gate-workflow` is set)
       id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
     env:
       PR: ${{ inputs.pr }}
@@ -655,6 +666,7 @@ jobs:
       ARMED_LABEL: ${{ inputs.armed-label }}
       CHANGELOG: ${{ inputs.changelog }}
       ASK_WORKFLOW: ${{ inputs.ask-workflow }}
+      GATE_WORKFLOW: ${{ inputs.gate-workflow }}
     steps:
       - name: Check the review's inputs
         shell: bash
@@ -663,6 +675,7 @@ jobs:
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] || fail 'pr must be the release PR'"'"'s number'
           [[ "$CHANGELOG" =~ ^[A-Za-z0-9._/-]+$ && "$CHANGELOG" != -* && "$CHANGELOG" != *..* && "$CHANGELOG" != /* ]] || fail 'changelog must be a path inside the repo'
           [[ -z "$ASK_WORKFLOW" || "$ASK_WORKFLOW" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]] || fail 'ask-workflow must be the file name of a workflow in .github/workflows (ask.yml)'
+          [[ -z "$GATE_WORKFLOW" || "$GATE_WORKFLOW" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]] || fail 'gate-workflow must be the file name of a workflow in .github/workflows (release-gate.yml)'
 
       - name: Find this workflow's commit for the review
         id: self
@@ -775,6 +788,7 @@ jobs:
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
           if [[ -n "$ASK_WORKFLOW" ]]; then args+=(--ask-workflow "$ASK_WORKFLOW"); fi
+          if [[ -n "$GATE_WORKFLOW" ]]; then args+=(--gate-workflow "$GATE_WORKFLOW"); fi
           if [[ -n "$RUN" ]]; then
             # The same record the build job writes, from the same results; it leaves the draft state alone.
             node shipyard/bin/shipyard record --from-candidate --review --release-run "$RUN" --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \

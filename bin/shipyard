@@ -13,6 +13,7 @@ const STEPS = {
   cut: () => require('../lib/cut-command'),
   'release-check': () => require('../lib/release-check-command'),
   record: () => require('../lib/record-command'),
+  'release-gate': () => require('../lib/release-gate-command'),
   ask: () => require('../lib/ask-command'),
   tag: () => require('../lib/tag-command'),
   deployment: () => require('../lib/deployment-command'),

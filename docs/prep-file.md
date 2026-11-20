@@ -10,18 +10,24 @@ All text fields hold at least one character that is not a space. No field outsid
 
 | Field | What it holds |
 |---|---|
-| `format` | `2`, the version of this format. A format 1 file is refused, with a message that says what to write. |
+| `format` | `3`, the version of this format. A format 1 or format 2 file is refused, with a message that says what to write: format 3 moved `notes.sections` to `notes.items` (each item has a `kind`), made the groups the six labels plus `Internal`, put the title's `v` before the version, raised an item's text to 300 characters and added the optional `notes.reference`. A release cut in format 2 is still read ([below](#how-the-release-pr-shows-it)). |
 | `level.bump` | `major`, `minor` or `patch`. |
 | `level.reasons` | Why this level: a list of sentences, at least one. The first is the reason that sets the level, as short as it can be: the audit record shows it beside the level. |
 | `level.flags` | An answer for each read-first flag in the facts: a list of `{ "flag": "<id>", "answer": "<text>" }`. `flag` is the flag's `id` in the facts; `answer` is what the prep run found and what it means for the level. |
-| `groups` | The group of each PR in the range: `Added`, `Changed`, `Fixed`, `Removed`, `Security` and `Internal`, each a list of PR numbers. Every PR in the range is in exactly one group. A group with no PRs may be left out. |
-| `notes.title` | The title of the release notes. |
+| `groups` | The group of each PR in the range, under the six labels of the release notes or `Internal`: `Before you upgrade`, `Security`, `What's new`, `Improvements`, `Bug fixes`, `Requirements` and `Internal`, each a list of PR numbers. Every PR in the range is in exactly one group. A group with no PRs may be left out. A format 2 group becomes: `Added` is `What's new`, `Changed` is `Improvements` (`What's new` for a new thing a user can do), `Fixed` is `Bug fixes`, `Removed` is `Before you upgrade` when the PR has an `Update-Needs:` line and `What's new` when it has none, and `Security` stays `Security`. A dependency-only PR is `Security` when it fixes a CVE, `Improvements` when a user notices it and `Internal` otherwise. A PR that changes what a user needs in place is `Requirements`. The CHANGELOG section lists each PR's own line under its label, in this order, and leaves `Internal` out. |
+| `notes.title` | The title of the release notes: `<Product> v<version> - <the main point>`, with the product's own name (`Example Product`, not `Example Product CLI`), a space, a `v` straight before the version, a space, a hyphen, a space and the main point. A new cut refuses another shape (`title-shape`); whether the number is the release's is the release check's job. |
 | `notes.summary` | One sentence of 140 characters or fewer. |
-| `notes.sections` | Items under short headings: a list of `{ "heading": "<text>", "items": [...] }`. A heading is 60 characters or fewer, and each section has at least one item. |
-| `notes.sections[].items[]` | `{ "name": "<2 to 4 words>", "text": "<the item>", "covers": [<PR numbers>] }`. `covers` lists the PRs in the range the item is about, at least one. Every item outside a "Before you update" (or "Before you upgrade") section has a `name` of 2 to 4 words and a `text` of 120 characters or fewer: the release notes show it as `- **<name>:** <text>`, and the #releases post as a bullet with the name in italics. An item in that section needs no name, but the #releases post titles its action block with one (2 to 4 words), and its `text` starts with its condition: `If your repo writes prep files, before its next cut: take who out of each change.` Only a new cut asks for names: the record and a re-ship read a prep file cut earlier, with no names, as it is. |
+| `notes.items` | The items of the release notes, the main point first: a list of `{ "kind": "<label>", "name": "<2 to 4 words>", "text": "<the item>", "covers": [<PR numbers>] }`, at least one. The order of the file never sets the order of the labels: the notes walk the six labels in order and keep the items of one label in file order. |
+| `notes.items[].kind` | The item's label, exactly one of the six: `Before you upgrade`, `Security`, `What's new`, `Improvements`, `Bug fixes`, `Requirements` (with a plain apostrophe in `What's new`). A note, a warning or a breaking change is `Before you upgrade`; "Enhancements" is `Improvements`; a security fix is `Security`, never `Bug fixes`. |
+| `notes.items[].name` | 2 to 4 words: the release notes show it as `- **<name>:** <text>`, and the #releases post as a bullet with the name in italics. Every item of a kind other than `Before you upgrade` has one. An item of that kind needs none, but the #releases post titles its action block with one (2 to 4 words). Only a new cut asks for names: the record and a re-ship read a prep file cut earlier, with no names, as it is. |
+| `notes.items[].text` | The item, 300 characters or fewer. Its first sentence stands alone, because the #releases post shows an item's name and that first sentence only. The text of a `Before you upgrade` item starts with its condition: `If your repo writes prep files, before its next cut: take who out of each change.` |
+| `notes.items[].covers` | The PRs in the range the item is about, at least one. |
+| `notes.reference` | Optional. Lists of types for reference (policy types, controls, actions): a list of `{ "title": "<text>", "entries": ["<text>"] }`, at least one. The notes show them after the items, below a `---` line, each as a `### <title>` with one bullet for each entry: never as labels, and the #releases post leaves them out. |
+| `notes.reference[].title` | The list's title, 60 characters or fewer, such as `Policy types`. |
+| `notes.reference[].entries` | The entries of the list, one line each, at least one. |
 | `report.headline` | What the release does, in 8 words or fewer. It ends the page's heading: `## <product> <version>: <headline>`. |
 | `report.ask` | The one paragraph of the Slack ask, written as a person asking a colleague to approve would write it. It starts with `This release`, is 15 to 70 words of plain sentences, and says what a person gets and what could go wrong. The tool adds the greeting, the release PR's link, the sentence on the checks and `Thanks!` around it (see [release-ask.md](release-ask.md)), so it holds none of them. Only a new cut needs it: the record, the ask and a re-ship read a prep file cut earlier, with none, as it is; but the ask posts nothing for one without it. An example: `This release lets any report download as a spreadsheet, fixes the dates that showed the wrong day after midnight, and makes the search page load faster. Nothing is removed.` |
-| `report.changes` | What changes for users, 5 rows at most: a list of `{ "before": "<text>", "after": "<text>", "label": "<text>", "covers": [<PR numbers>] }`. `before` is what a person saw or had before the release, `after` what they have now, in plain words (the column is headed Now, so it does not start with "Now"), and it reads on its own, because the Now column shows it without its `before`. `label` is the change in 2 to 4 words, such as "the mod page change": the page's Still needed row names it. `covers` lists the PRs in the range the change is about, at least one; a row may cover several. Every PR grouped `Added`, `Changed`, `Fixed`, `Removed` or `Security` is in some change's `covers`, unless the list holds 5 rows: the page then counts the rest as "Also N more changes". |
+| `report.changes` | What changes for users, 5 rows at most: a list of `{ "before": "<text>", "after": "<text>", "label": "<text>", "covers": [<PR numbers>] }`. `before` is what a person saw or had before the release, `after` what they have now, in plain words (the column is headed Now, so it does not start with "Now"), and it reads on its own, because the Now column shows it without its `before`. `label` is the change in 2 to 4 words, such as "the mod page change": the page's Still needed row names it. `covers` lists the PRs in the range the change is about, at least one; a row may cover several. Every PR grouped under any label but `Internal` is in some change's `covers`, unless the list holds 5 rows: the page then counts the rest as "Also N more changes". |
 | `report.safety` | Could it break anything? `{ "answer": "<text>", "why": "<text>" }`. `answer` is 4 words or fewer and starts with its answer word (No, Not, Unlikely, Yes, Likely, Possibly, Maybe, Only, Rarely or Hardly); `why` is one line of 25 words or fewer. |
 | `report.risks` | What could go wrong, a row each of the page's If \| Then table: a list of `{ "if": "<text>", "then": "<text>", "untested": "<text>" }`. `if` reads as the If cell ("the release fails before the site updates"), `then` what happens or what we do, and `untested` (optional) why that case was not tested. The tool adds the last row, how to go back. |
 | `report.undo` | How to go back: `{ "how": "<text>", "howLong": "<text>" }`. `how` is what going back is, in a few words that name no version (the tool names it): "we publish it again". `howLong` is how long it takes, from the repo's real merge-to-live time: "About 20 minutes". |
@@ -37,7 +43,7 @@ The release PR's body is a page a person reads in under a minute: about 20 rende
 
 - the heading, `## <product> <version>: <headline>`, where the product is `product` in the repo's `.github/release.json` (the repo's name as it is, when it has none), a first release adds ` (first release)` after the version, and a report with `urgent: true` adds ` (urgent fix)` after it;
 - the decision table, which the tool writes from what it found: its header row is the decision (`❌ No: do not approve`, `⏳ Not yet: checks still running`, `🔁 Approve again: ...`, `✅ Approved: ready to merge` or `✅ Yes`), then the rows Checks, Production setup (when the repo turns the production plan on), During the deploy (when `report.duringDeploy` is set), A person's step (a row for each of `report.personSteps`), Approved by and Still needed;
-- **What changes for** the repo's `audience` (`visitors`, `customers` or `repos` in its `.github/release.json`; users when it has none): a Before \| Now table, a row for each change, the kind first (New, Changed, Fixed, Removed or Security, from the groups of the PRs it covers), then one line naming the `internal` changes. When no change is one a user sees: **What changes: nothing** they see, then each `internal` change as a bullet, 5 at most;
+- **What changes for** the repo's `audience` (`visitors`, `customers` or `repos` in its `.github/release.json`; users when it has none): a Before \| Now table, a row for each change, the kind first (the first of the six labels, in their order, that groups a PR it covers: `Security`, `What's new`, `Bug fixes` and so on), then one line naming the `internal` changes. When no change is one a user sees: **What changes: nothing** they see, then each `internal` change as a bullet, 5 at most;
 - **Could it break anything?** with `safety.answer`, then `safety.why`, then an If \| Then table: a row for each of `risks` (an `untested` reason after its If text), and last, how to go back: the version, which the tool names, then `undo.how` and `undo.howLong`.
 
 Then two folds, never one inside another: **What gets published**, a table of where each text goes and each text word for word (the GitHub Release's text, the CHANGELOG section, and the release notes), and **Evidence**, with a table of who asked for, made and reviewed each change, a table of the checks, a table of the facts of the release and what happens on merge. `managerNotes` are a comment on the PR.
@@ -46,24 +52,24 @@ Above the folds, the manager's fields (`headline`, `ask`, each change's `before`
 
 **A public repo's texts are public.** When the facts say the repo is public, `lint-prep` holds every text the release PR, the prep job's comment and the Slack ask show to the release notes' two rules: no internal term from the facts' `internalTerms` and no link to a private repo or an internal page. That is each field of `report` above the folds (the headline, `ask`, each change, `safety`, `risks`, `undo`, `internal`, `duringDeploy`, each person's step), `report.managerNotes`, `level.reasons` and each `level.flags[].answer`. A private repo's texts are not held to it. A problem names the field (`internal-term` or `private-link`) and never the text it matched.
 
-Format 2 has no compatibility layer: the release manager writes the prep for the version the repo pins. The cut and the record of one release write the body together, so a repo updates both at once.
+A prep file written now is format 3: format 1 and format 2 files are refused (`format-1`, `format-2`), and the release manager writes the prep for the version the repo pins. The cut and the record of one release write the body together, so a repo updates both at once. A release cut in format 2 is still read: its stored prep is turned into format 3 in memory when the record, the ask or a re-ship reads it (`Added` is `What's new`, `Changed` is `Improvements`, `Fixed` is `Bug fixes`, `Removed` is `What's new`, and each section's items take a kind from its heading), and the notes text it stored is shown as it is, never written again. A reader of that text takes the old `## Fixes` headings and the new labels alike.
 
 A short file:
 
 ```json
 {
-  "format": 2,
+  "format": 3,
   "level": {
     "bump": "patch",
     "reasons": ["Only a fix."],
     "flags": []
   },
-  "groups": { "Fixed": [103] },
+  "groups": { "Bug fixes": [103] },
   "notes": {
-    "title": "Example Product 1.4.3",
+    "title": "Example Product v1.4.3 - dates past midnight show correctly",
     "summary": "Run dates now show correctly across midnight.",
-    "sections": [
-      { "heading": "Fixed", "items": [{ "name": "Midnight runs fixed", "text": "Runs that cross midnight show the day they started.", "covers": [103] }] }
+    "items": [
+      { "kind": "Bug fixes", "name": "Midnight runs fixed", "text": "Runs that cross midnight show the day they started.", "covers": [103] }
     ]
   },
   "report": {
@@ -81,6 +87,127 @@ A short file:
     "managerNotes": []
   }
 }
+```
+
+## Labels and the display rule
+
+Each item carries its `kind`, one of the six labels. The release notes show the items by that rule:
+
+- When every item has the same kind, and that kind is neither `Before you upgrade` nor `Security`, the notes show **no label**: the bullets alone.
+- `Before you upgrade` and `Security` are **always labelled**.
+- In every other case, each label that has items shows as a `## <label>` line, in this order: `Before you upgrade`, `Security`, `What's new`, `Improvements`, `Bug fixes`, `Requirements`. A label with no items does not show.
+
+So a writer never writes an empty or out-of-order label: the order of `items` in the file sets only the order inside one label. The CHANGELOG section follows the same rule at `### <label>`. The optional `notes.reference` comes last, under a `---` line, and never counts as an item. Each example below is a `notes` object, then the text the release notes show for it; a test renders each with the real code and compares.
+
+#### Example: one kind, no labels
+
+Every item is `Bug fixes`, so the notes show the bullets and no label.
+
+```json
+{
+  "title": "Example Product v1.4.3 - dates past midnight show correctly",
+  "summary": "Run dates now show correctly across midnight, and two other bugs are fixed.",
+  "items": [
+    { "kind": "Bug fixes", "name": "Midnight runs fixed", "text": "Runs that cross midnight show the day they started. Before, they showed the day they ended.", "covers": [103] },
+    { "kind": "Bug fixes", "name": "Search page crash", "text": "The search page no longer stops when a query holds a quote mark.", "covers": [104] },
+    { "kind": "Bug fixes", "name": "Export file names", "text": "An exported report keeps the name you gave it.", "covers": [105] }
+  ]
+}
+```
+
+```markdown
+# Example Product v1.4.3 - dates past midnight show correctly
+
+Run dates now show correctly across midnight, and two other bugs are fixed.
+
+- **Midnight runs fixed:** Runs that cross midnight show the day they started. Before, they showed the day they ended.
+- **Search page crash:** The search page no longer stops when a query holds a quote mark.
+- **Export file names:** An exported report keeps the name you gave it.
+```
+
+#### Example: a Security item is always labelled
+
+One item, and it is `Security`: the label shows although every item has the same kind.
+
+```json
+{
+  "title": "Example Product v1.4.4 - a session leak is closed",
+  "summary": "A fix keeps session tokens out of the debug logs.",
+  "items": [
+    { "kind": "Security", "name": "Session tokens stay private", "text": "Debug logs no longer hold session tokens. If you turned debug logs on before this release, delete the old ones.", "covers": [201] }
+  ]
+}
+```
+
+```markdown
+# Example Product v1.4.4 - a session leak is closed
+
+A fix keeps session tokens out of the debug logs.
+
+## Security
+
+- **Session tokens stay private:** Debug logs no longer hold session tokens. If you turned debug logs on before this release, delete the old ones.
+```
+
+#### Example: mixed kinds, every label in order
+
+Five kinds, written out of order in the file. The notes show the labels in the fixed order, each with its items, then the `reference` block under a rule. The #releases post shows the `Before you upgrade` item as its action block and each other item's name and first sentence; it shows no labels and no reference lists.
+
+```json
+{
+  "title": "Example Product v1.5.0 - reports download as spreadsheets",
+  "summary": "Any report downloads as a spreadsheet, the search page loads faster and a date bug is fixed.",
+  "items": [
+    { "kind": "Bug fixes", "name": "Midnight runs fixed", "text": "Runs that cross midnight show the day they started.", "covers": [103] },
+    { "kind": "Requirements", "name": "Newer runtime needed", "text": "Example Product now needs version 20 of its runtime or newer.", "covers": [112] },
+    { "kind": "Improvements", "name": "Faster search page", "text": "The search page opens twice as fast on large projects. Nothing changes in how it looks.", "covers": [110] },
+    { "kind": "Before you upgrade", "name": "Rename the export option", "text": "If a script calls the export with --csv, use --format csv instead: the old option is removed.", "covers": [108] },
+    { "kind": "What's new", "name": "Spreadsheet downloads", "text": "Any report downloads as a spreadsheet from its page.", "covers": [101] }
+  ],
+  "reference": [
+    { "title": "Report types", "entries": ["Monthly summary", "Run history", "Search usage"] },
+    { "title": "Export formats", "entries": ["CSV", "Spreadsheet"] }
+  ]
+}
+```
+
+```markdown
+# Example Product v1.5.0 - reports download as spreadsheets
+
+Any report downloads as a spreadsheet, the search page loads faster and a date bug is fixed.
+
+## Before you upgrade
+
+- **Rename the export option:** If a script calls the export with --csv, use --format csv instead: the old option is removed.
+
+## What's new
+
+- **Spreadsheet downloads:** Any report downloads as a spreadsheet from its page.
+
+## Improvements
+
+- **Faster search page:** The search page opens twice as fast on large projects. Nothing changes in how it looks.
+
+## Bug fixes
+
+- **Midnight runs fixed:** Runs that cross midnight show the day they started.
+
+## Requirements
+
+- **Newer runtime needed:** Example Product now needs version 20 of its runtime or newer.
+
+---
+
+### Report types
+
+- Monthly summary
+- Run history
+- Search usage
+
+### Export formats
+
+- CSV
+- Spreadsheet
 ```
 
 ## What callers must give
@@ -139,9 +266,9 @@ The flag's id is `caller-needs-<workflow>-<kind>-<name>`, with the job after the
 - a group holds a PR that is not in the range (`group-not-in-range`);
 - the facts' `callerNeeds` is not empty, `level.bump` is `minor` or `patch` and a raise's flag has no answer (`caller-needs-raised`): the problem names the workflow, the job and what rose. A `major` passes with no answer, below 1.0 too (see [What callers must give](#what-callers-must-give));
 - a flag in the facts has no answer (`flag-unanswered`), an answer names a flag the facts do not raise (`flag-not-in-facts`), or a flag is answered twice (`flag-answered-twice`);
-- the file is format 1 (`format-1`), refused alone with a message that says what format 2 holds;
+- the file is format 1 (`format-1`) or format 2 (`format-2`), refused alone with a message that says what format 3 holds and, for format 2, what moved (`notes.sections` to `notes.items`, the groups to the six labels plus `Internal`, the title's `v`, 300 characters, `notes.reference`);
 - a `covers` entry, of a release-notes item or a report change, is not a PR in the range (`covers-not-in-range`);
-- a PR a user can see (any group but `Internal`) is in no change's `covers` (`pr-no-change`);
+- a PR a user can see (any label but `Internal`) is in no change's `covers` (`pr-no-change`);
 - `internal` is missing when a PR is grouped `Internal` (`internal-missing`), there when none is (`internal-unneeded`), or one of its texts is over 12 words (`internal-too-long`);
 - a new cut's `report.ask` is missing (`ask-missing`, which shows an example), does not start with "This release" (`ask-start`) or is not 15 to 70 words (`ask-length`); its words are checked above the folds like the rest, but do not count in the report's 300;
 - `report.duringDeploy` is over 15 words (`during-deploy-too-long`); `report.urgent` is `true` on a level that is not `patch` (`urgent-not-patch`), on a first release (`urgent-first-release`) or on facts that are not a patch's, with no `patch` (`urgent-not-from-production`): an urgent fix is a patch cut from the production tag, whichever branch its run started on, so the prep run, the lint and the cut all read the rule from the facts. `lint-prep` still takes `--work-branch <branch>`, which no longer changes it; a patch's `level.bump` is not `patch` (`patch-not-patch`). A person step's `step` text is held to the plain-words rules (no PR number, commit, file path, config key or HTML code, no internal term) but not to the banned words: a step after the merge is a step;
@@ -149,12 +276,14 @@ The flag's id is `caller-needs-<workflow>-<kind>-<name>`, with the job after the
 - a field above the folds (above) holds one of the banned words, or an internal term from the facts' `internalTerms`, matched as a whole word in any case (`approver-term`); or a PR number (`pr-number`), a commit (`commit`), a file path (`file-path`), a config key or code (`config-key`) or an HTML code (`html-code`);
 - a change has a `who` field, which an earlier format 2 allowed (`who-removed`): the Now cell holds `after` alone, so take `who` out. A prep an earlier Shipyard already cut is read again as it is, its `who` ignored;
 - the top of the page, rendered as the cut writes it with every row the record can add, has over 25 lines (`top-too-long`), a paragraph or a bullet over 25 words (`paragraph-too-long`), or a table cell over 15 words (`cell-too-long`). What is counted is what the page renders: a Now cell holds `after`, and the undo row the version the tool names. A blank line and a table's alignment row are not lines;
-- an item of "Before you update" (or "Before you upgrade") has a `text` that does not start with `If`, `When`, `Before`, `Once` or `Only`, in any case (`step-condition`): the #releases post shows it as "Action needed" and it says who must act and when. A prep cut earlier is read as it is;
-- an item of the release notes outside "Before you update" (or "Before you upgrade") has no `name` (`item-name-missing`), a `name` of fewer than 2 or more than 4 words (`item-name-length`), or a `text` over 120 characters (`item-text-too-long`);
-- the release notes (title, summary, a heading, an item's name or an item) hold:
+- an item of kind `Before you upgrade` has a `text` that does not start with `If`, `When`, `Before`, `Once` or `Only`, in any case (`step-condition`): the #releases post shows it as "Action needed" and it says who must act and when. A prep cut earlier is read as it is;
+- a new cut's `notes.title` is not `<Product> v<version> - <the main point>`, with the product's own name from the facts (`title-shape`): a missing `v`, the product's name changed or a missing main point. The number itself is the release check's job;
+- an item's `kind` is not one of the six labels, or `notes.items` is empty (`schema`);
+- an item of the release notes of a kind other than `Before you upgrade` has no `name` (`item-name-missing`), a `name` of fewer than 2 or more than 4 words (`item-name-length`), or a `text` over 300 characters (`item-text-too-long`);
+- the release notes (title, summary, an item's name or text, a reference title or an entry) hold:
   - an internal term from the facts' `internalTerms`, matched as a whole word in any case (`internal-term`);
   - a private link (`private-link`), with any scheme (`https://`, `ftp://`, `file://`) or none: a GitHub link (an `api.github.com/repos/…` link, a `git@github.com:<owner>/<repo>.git` remote, or a `<owner>/<repo>#12` or `<owner>/<repo>@<sha>` reference, which GitHub turns into a link) into a repo that is neither the product repo when it is public nor one of `publicRepos` (GitHub's own pages such as `github.com/features` are fine); a GitHub attachment or a gist; a link to an IP address, a host with no dot (`http://buildbox/`), or a `localhost`, `.local`, `.internal`, `.intranet`, `.corp` or `.lan` host; a link to Slack, claude.ai, Google Docs or Drive, Notion, Linear, Atlassian or Figma; a link to one of `privateHosts`; or a link with a user name or password in it. With no scheme, an IP address or `localhost` counts only with a port or a path, so a version such as `1.2.3.4` is fine;
-  - a file path or a file's name (`file-path`), with or without a line number, a line anchor or a query: `lib/prep.js`, `src/main.rs:42`, `src/main.rs#L42-L50`, `./run.sh`, `~/.config`, `$HOME/.config`, `%APPDATA%\example`, `/etc/hosts`, `.github/workflows`, `C:\tools`, `C:/tools`, a lowercase path of three parts or more, or ending in `/`, that starts in a source folder (`pkg/`, `internal/`, `cmd/`, `src/`, `lib/`, `vendor/`, `node_modules/`, `dist/` or `usr/`, as in `pkg/query/execute` or `internal/auth/`; prose such as `internal/external`, `build/deploy`, `Linux/macOS/Windows` or `11/13/2026` is fine), or a name such as `server.go`, `config.yml` or `.gitignore` (a product's name such as `Node.js`, and a kind of file such as `.json` or `.env`, is fine; a link's address is checked as a link, not a path);
+  - a file path or a file's name (`file-path`; not checked in the `reference` lists, where a type's name can look like a path), with or without a line number, a line anchor or a query: `lib/prep.js`, `src/main.rs:42`, `src/main.rs#L42-L50`, `./run.sh`, `~/.config`, `$HOME/.config`, `%APPDATA%\example`, `/etc/hosts`, `.github/workflows`, `C:\tools`, `C:/tools`, a lowercase path of three parts or more, or ending in `/`, that starts in a source folder (`pkg/`, `internal/`, `cmd/`, `src/`, `lib/`, `vendor/`, `node_modules/`, `dist/` or `usr/`, as in `pkg/query/execute` or `internal/auth/`; prose such as `internal/external`, `build/deploy`, `Linux/macOS/Windows` or `11/13/2026` is fine), or a name such as `server.go`, `config.yml` or `.gitignore` (a product's name such as `Node.js`, and a kind of file such as `.json` or `.env`, is fine; a link's address is checked as a link, not a path);
 - the report is over 300 words (`report-too-long`). Every word of `report` counts but the ask's own paragraph (`report.ask`, 15 to 70 words of its own): the headline, each change with its before, after and label, the safety answer and why, each risk, the undo, each internal change and each note for the release manager. The PR numbers in `covers` and the fixed words of the release PR are not words of the report.
 
 A problem names the field, never the text it matched, because the log of a public repo is public. A field outside the format is named by its place in its object (`notes: holds a field outside this format (field 4)`), not by its name, and an answer to an unknown flag does not repeat the flag.

@@ -64,7 +64,7 @@ on:
         type: boolean
         default: true
       product:
-        description: 'The product''s name, for a GitHub Release title when the release has no release notes ("<product> <version>"). Default: the repo''s name.'
+        description: 'The product''s name, for a GitHub Release title when the release has no release notes ("<product> v<version>"). Default: the repo''s name.'
         type: string
         default: ''
       changelog:
