@@ -14,7 +14,7 @@
 #   3. cut (`shipyard cut`): the commit with the CHANGELOG section and the notes, made through GitHub's
 #      API with the caller's token (so GitHub signs it: a repo that requires signed commits accepts it),
 #      the branch on it, and the artifact. The commit the facts read must be in the history of the commit
-#      the run started from, a re-ship's in the base's. The checkout is never committed to or pushed from;
+#      the run started from; a re-ship's and a patch's is the tip of the base. The checkout is never committed to or pushed from;
 #   4. upload the artifact: the files `branch`, `sha`, `title` and `body.md`.
 # A light release (input `profile: light`) skips the prep file and its lint: the cut makes the version from the day and writes
 # no CHANGELOG section or release notes (docs/how-we-release.md, "Light releases").
@@ -23,6 +23,10 @@
 # input `fixes` names commits of the working branch, which the cut cherry-picks onto the branch.
 # It is started on the working branch like any cut (that is where the newest caller is, and where the
 # fleet's hook opens the PR from); its commit is the tip of the base the version merged into.
+# A patch (input `patch: true`, with `fixes`) ships fixes already merged into the working branch from the production
+# tag: started by hand on the working branch, its commit is the tip of `base` (`main`, or `main-<x.y>`), the facts list
+# the fix PRs (`shipyard facts --fixes`), the prep file is checked against them as any cut's, and the cut picks the fixes
+# onto `release/<next patch>` after the cut commit, which records the working branch for the merge-back.
 #
 # Nothing from the caller's inputs goes into a shell line: each reaches a step as an environment
 # variable and is checked there. The caller's code is never run with the token in its environment.
@@ -33,7 +37,7 @@ on:
   workflow_call:
     inputs:
       commit:
-        description: The full 40-character commit the prep job read. The facts end here; the release is cut from it, and it must be in the history of the commit this run started from (a re-ship's is the tip of its base, see reship).
+        description: The full 40-character commit the prep job read. The facts end here; the release is cut from it, and it must be in the history of the commit this run started from (a re-ship's and a patch's is the tip of its base, see reship and patch).
         type: string
         required: true
       prep-run:
@@ -71,8 +75,13 @@ on:
         type: string
         required: false
         default: ''
+      patch:
+        description: 'A patch (docs/how-we-release.md, "Patches and patch lines") - true to ship the fixes already merged into the working branch from the tip of base (main, or main-<x.y>), the production tag''s branch, as release/<next patch>. Start the run on the working branch, with commit the tip of base and fixes the fixes'' merge commits. The prep file is made from facts with the fixes (shipyard facts --fixes), and its level is patch.'
+        type: boolean
+        required: false
+        default: false
       fixes:
-        description: Only with reship. The fix commits of the working branch (the merge commits of PRs already merged and reviewed there), full 40-character commit ids separated by spaces. The cut cherry-picks them, in the order given, onto release/<version> after the re-ship commit, so the release PR holds the fix with no PR into the release branch. A commit that changes a file under .github/workflows/ (the job's own token cannot write one, so a person cherry-picks it onto the release branch after the cut), is not on the working branch, did not come from a merged PR, or does not apply stops the cut before anything is written to the remote.
+        description: With reship or patch. The fix commits of the working branch (the merge commits of PRs already merged and reviewed there), full 40-character commit ids separated by spaces. The cut cherry-picks them, in the order given, onto release/<version> after the re-ship commit (for a patch, after the cut commit), so the release PR holds the fix with no PR into the release branch. A patch takes at least one. A commit that changes a file under .github/workflows/ (the job's own token cannot write one, so a person cherry-picks it onto the release branch after the cut), is not on the working branch, did not come from a merged PR, or does not apply stops the cut before anything is written to the remote.
         type: string
         required: false
         default: ''
@@ -102,6 +111,7 @@ jobs:
       CHANGELOG: ${{ inputs.changelog }}
       PROFILE: ${{ inputs.profile }}
       RESHIP: ${{ inputs.reship }}
+      PATCH: ${{ inputs.patch }}
       FIXES: ${{ inputs.fixes }}
     steps:
       - name: Check the inputs
@@ -111,6 +121,13 @@ jobs:
           [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail 'commit must be a full 40-character commit id'
           [[ -z "$PROFILE" || "$PROFILE" = light ]] || fail 'profile is light, or empty for the full release'
           if [[ -n "$PROFILE" && -n "$RESHIP" ]]; then fail 'a re-ship is of a version that merged: leave out profile'; fi
+          [[ -z "$PATCH" || "$PATCH" = true || "$PATCH" = false ]] || fail 'patch is true or false'
+          if [[ "$PATCH" = true ]]; then
+            [[ -z "$RESHIP" ]] || fail 'a patch ships new fixes as the next version, a re-ship finishes a version that merged: give one'
+            [[ -z "$PROFILE" ]] || fail 'a light release has no patch: leave out profile'
+            [[ -n "$FIXES" ]] || fail 'a patch ships fixes already merged into the working branch: name them in fixes'
+            [[ "$GITHUB_REF_TYPE" = "branch" ]] || fail 'a patch is started on the working branch its fixes merged into, not on a tag'
+          fi
           if [[ -n "$PROFILE" && ( -n "$PREP_RUN" || -n "$PREP_FILE" ) ]]; then fail 'a light release reads no prep file: leave out prep-run and prep-file'; fi
           if [[ -n "$RESHIP" ]]; then
             [[ "$RESHIP" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail 'reship must be a version, X.Y.Z'
@@ -120,7 +137,7 @@ jobs:
             if [[ -z "$PREP_RUN" && -z "$PREP_FILE" ]]; then fail 'name the prep file: prep-run (the prep job'"'"'s run) or prep-file (a path in the repo)'; fi
           fi
           if [[ -n "$FIXES" ]]; then
-            [[ -n "$RESHIP" ]] || fail 'fixes goes with reship: a cut takes no cherry-picks'
+            [[ -n "$RESHIP" || "$PATCH" = true ]] || fail 'fixes goes with reship or patch: a cut takes no cherry-picks'
             [[ "$GITHUB_REF_TYPE" = "branch" ]] || fail 'fixes are commits of the working branch: start the re-ship on it, not on a tag'
             [[ "$FIXES" =~ ^[0-9a-f]{40}([[:space:]]+[0-9a-f]{40})*[[:space:]]*$ ]] || fail 'fixes must be full 40-character commit ids separated by spaces'
           fi
@@ -169,7 +186,7 @@ jobs:
 
       # The prep job's commit, with every tag and branch: the facts read the tags, the cut looks at
       # the remote branches, and the cut checks the commit is in the history of this run's own
-      # (a re-ship's: it is the tip of the base's).
+      # (a re-ship's or a patch's: it is the tip of the base's).
       # No credentials stay in the checkout: the facts' detector is the repo's own code.
       - name: Check out the repo at the prep job's commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -210,7 +227,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           if [[ -n "$RESHIP" ]]; then echo 'A re-ship makes no facts: the cut reads the version'"'"'s own.'; exit 0; fi
-          node shipyard/bin/shipyard facts --repo "$GITHUB_REPOSITORY" --to "$COMMIT" --tag-prefix "$TAG_PREFIX" --dir caller --out "$RUNNER_TEMP/release/facts.json"
+          # A patch's facts list its fixes, the merge commits of the working branch this run started on.
+          patch=()
+          if [[ "$PATCH" = true ]]; then patch=(--fixes "$FIXES" --work-branch "$GITHUB_REF_NAME"); fi
+          node shipyard/bin/shipyard facts --repo "$GITHUB_REPOSITORY" --to "$COMMIT" --tag-prefix "$TAG_PREFIX" --dir caller --out "$RUNNER_TEMP/release/facts.json" "${patch[@]}"
 
       # Refuses a prep file made for another range, and one that fails the lint: the job stops here.
       - name: Check the prep file against the facts
@@ -251,6 +271,14 @@ jobs:
             node shipyard/bin/shipyard cut \
               --facts "$RUNNER_TEMP/release/facts.json" \
               --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --within "$within" "${work[@]}"
+            exit 0
+          fi
+          if [[ "$PATCH" = true ]]; then
+            # A patch is cut from the tip of the base, which is not in the working branch's history: the cut checks it is
+            # that tip, in place of --within, and picks the fixes the facts name after the cut commit.
+            node shipyard/bin/shipyard cut \
+              --facts "$RUNNER_TEMP/release/facts.json" --prep "$RUNNER_TEMP/release/prep.json" \
+              --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" "${work[@]}"
             exit 0
           fi
           node shipyard/bin/shipyard cut \
