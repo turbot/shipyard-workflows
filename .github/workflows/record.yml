@@ -49,6 +49,11 @@
 # ones of the workflows it ran, and of any workflow that finished on the build's source commit (the
 # approver sees no run awaiting approval), and leaves the rest.
 #
+# A CLI's release PR is opened with the job's own token, and GitHub creates no workflow run for an
+# event that token causes, bar `workflow_dispatch` and `repository_dispatch`: so the caller's Slack ask,
+# started by `workflow_run` of this record, never runs. With `ask-workflow` set, the record starts the
+# ask itself once the body says SHIP (below), by `workflow_dispatch` on the default branch with the PR's number.
+#
 # The same step that writes the body sets one commit status, `shipyard/release`, on the PR's head,
 # from the verdict the body shows: success for SHIP
 # approved at that head with nothing else open, pending for SHIP with a step still open (a check still
@@ -101,6 +106,11 @@ on:
         type: string
         required: false
         default: '10'
+      ask-workflow:
+        description: The file name of this repo's ask workflow (in .github/workflows), such as `ask.yml`. It must accept `workflow_dispatch` with an input `pr`. When it is set and the record has just written SHIP at the PR's head, the record starts it on the default branch with the PR's number, once for each head, because a CLI's release PR is opened with the job's token and so starts no `workflow_run` of its own. A run of it is not judged by the record. Left empty, nothing is started (docs/release-ask.md).
+        type: string
+        required: false
+        default: ''
       required-check-workflows:
         description: Comma-separated file names of this repo's workflows (in .github/workflows) that make the checks the base branch's rules require, such as `ci.yml`. Each must accept `workflow_dispatch`. Each is run on the release branch, so its checks land on the PR's head.
         type: string
@@ -136,6 +146,7 @@ jobs:
       CHANGELOG: ${{ inputs.changelog }}
       WAIT_MINUTES: ${{ inputs.check-wait-minutes }}
       CHECK_WORKFLOWS: ${{ inputs.required-check-workflows }}
+      ASK_WORKFLOW: ${{ inputs.ask-workflow }}
     steps:
       - name: Check the inputs
         shell: bash
@@ -145,6 +156,7 @@ jobs:
           [[ "$RESULTS_RUN" =~ ^[0-9]+$ ]] || fail 'results-run must be a run id (digits), unless review is true'
           [[ "$CHANGELOG" =~ ^[A-Za-z0-9._/-]+$ && "$CHANGELOG" != -* && "$CHANGELOG" != *..* && "$CHANGELOG" != /* ]] || fail 'changelog must be a path inside the repo'
           [[ "$WAIT_MINUTES" =~ ^[0-9]+$ ]] && (( WAIT_MINUTES <= 60 )) || fail 'check-wait-minutes must be a whole number from 0 to 60'
+          [[ -z "$ASK_WORKFLOW" || "$ASK_WORKFLOW" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]] || fail 'ask-workflow must be the file name of a workflow in .github/workflows (ask.yml)'
           IFS=$', \t' read -ra listed <<< "$(printf '%s' "$CHECK_WORKFLOWS" | tr '\n' ',')"
           for w in "${listed[@]}"; do
             if [[ -n "$w" && ! "$w" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]]; then
@@ -244,6 +256,7 @@ jobs:
           if [[ -n "$SHIPYARD_SHA" ]]; then args+=(--shipyard-sha "$SHIPYARD_SHA"); fi
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
+          if [[ -n "$ASK_WORKFLOW" ]]; then args+=(--ask-workflow "$ASK_WORKFLOW"); fi
           node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
 
@@ -553,8 +566,63 @@ jobs:
           if [[ -n "$SHIPYARD_SHA" ]]; then args+=(--shipyard-sha "$SHIPYARD_SHA"); fi
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
+          if [[ -n "$ASK_WORKFLOW" ]]; then args+=(--ask-workflow "$ASK_WORKFLOW"); fi
           node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
-            --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
+            --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}" \
+            | tee "$RUNNER_TEMP/record.log"
+
+      # A CLI's release PR is opened with the job's token, so no `workflow_run` follows this run and the caller's ask never starts
+      # (GitHub creates no run for an event that token causes, bar `workflow_dispatch`). With `ask-workflow` set, a record that
+      # has just written SHIP starts the ask itself: `workflow_dispatch` on the default branch with the PR's number, which the
+      # job's token does start. The ask workflow keeps every check it makes (a draft, a missing or stale record, the default branch).
+      # Only for a record that says SHIP, only while the PR is still at the head this run recorded, ready for review, and
+      # once for each head: a commit status `shipyard/ask` on the head says it was started, so a record run that comes again on
+      # the same head starts nothing. The ask is a courtesy and never holds a release: one that cannot be started is a warning.
+      # A record that says HOLD, or a head that moved, starts none.
+      - name: Ask the approvers once the record says SHIP
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          warn() { echo "::warning title=Record::$1"; }
+          if [[ -z "$ASK_WORKFLOW" ]]; then
+            echo 'No ask-workflow listed: no ask is started.'
+            exit 0
+          fi
+          # The line `shipyard record` prints: "Record for <tag>: SHIP" or "Record for <tag>: HOLD (<reasons>)".
+          if ! grep -Eq '^Record for [A-Za-z0-9._-]+: SHIP([ .]|$)' "$RUNNER_TEMP/record.log"; then
+            echo 'The record does not say SHIP: no ask is started.'
+            exit 0
+          fi
+          head=$(git -C caller rev-parse HEAD)
+          short=${head:0:7}
+          pull=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '[.head.sha, (.draft | tostring)] | @tsv') \
+            || { warn "could not read #$PR, so the ask is not started"; exit 0; }
+          IFS=$'\t' read -r now draft <<< "$pull"
+          if [[ "$now" != "$head" ]]; then
+            echo "#$PR moved to ${now:0:7} since the record at $short: the record of that commit starts the ask."
+            exit 0
+          fi
+          if [[ "$draft" != false ]]; then
+            warn "#$PR is still a draft at $short although the record says SHIP, and the ask refuses a draft, so it is not started"
+            exit 0
+          fi
+          started=$(gh api "repos/$GITHUB_REPOSITORY/commits/$head/statuses?per_page=100" --jq '[.[] | select(.context == "shipyard/ask")] | length') \
+            || { warn "could not read the statuses of $short, so the ask is not started"; exit 0; }
+          if [[ "$started" != 0 ]]; then
+            echo "The ask was already started for $short: not started again."
+            exit 0
+          fi
+          default=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch) \
+            || { warn "could not read the default branch, so the ask is not started"; exit 0; }
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/$ASK_WORKFLOW/dispatches" -f ref="$default" -f "inputs[pr]=$PR" > /dev/null; then
+            warn "the ask workflow $ASK_WORKFLOW could not be started on $default: it must exist there and accept workflow_dispatch with an input pr. Run it by hand for #$PR"
+            exit 0
+          fi
+          echo "Started $ASK_WORKFLOW on $default for #$PR (the record at $short says SHIP)."
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$head" \
+            -f state=success -f context=shipyard/ask -f description="Ask started for #$PR on $default" > /dev/null \
+            || warn "could not post the status shipyard/ask on $short: a record run that comes again on it starts the ask again"
 
   # A review: the same record, read again from the results of the release run the record on the
   # page names, once that run is checked to be this release's; a page that names none is read from
@@ -586,6 +654,7 @@ jobs:
       FLEET_LOGINS: ${{ inputs.fleet-logins }}
       ARMED_LABEL: ${{ inputs.armed-label }}
       CHANGELOG: ${{ inputs.changelog }}
+      ASK_WORKFLOW: ${{ inputs.ask-workflow }}
     steps:
       - name: Check the review's inputs
         shell: bash
@@ -593,6 +662,7 @@ jobs:
           fail() { echo "::error title=Record::$1"; exit 2; }
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] || fail 'pr must be the release PR'"'"'s number'
           [[ "$CHANGELOG" =~ ^[A-Za-z0-9._/-]+$ && "$CHANGELOG" != -* && "$CHANGELOG" != *..* && "$CHANGELOG" != /* ]] || fail 'changelog must be a path inside the repo'
+          [[ -z "$ASK_WORKFLOW" || "$ASK_WORKFLOW" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*\.ya?ml$ ]] || fail 'ask-workflow must be the file name of a workflow in .github/workflows (ask.yml)'
 
       - name: Find this workflow's commit for the review
         id: self
@@ -704,6 +774,7 @@ jobs:
           if [[ -n "$SHIPYARD_SHA" ]]; then args+=(--shipyard-sha "$SHIPYARD_SHA"); fi
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
+          if [[ -n "$ASK_WORKFLOW" ]]; then args+=(--ask-workflow "$ASK_WORKFLOW"); fi
           if [[ -n "$RUN" ]]; then
             # The same record the build job writes, from the same results; it leaves the draft state alone.
             node shipyard/bin/shipyard record --from-candidate --review --release-run "$RUN" --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
