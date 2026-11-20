@@ -11,15 +11,15 @@
 #   1. make the facts at the prep job's commit (`shipyard facts`);
 #   2. check the prep file against those facts (`shipyard lint-prep`), so a prep file made for
 #      another commit, or one that fails the lint, never gets further;
-#   3. cut (`shipyard cut`): the commit with the CHANGELOG section and the notes, made through GitHub's
+#   3. cut (`shipyard cut`): the commit with only the CHANGELOG section (the facts and notes ride in the PR body), made through GitHub's
 #      API with the caller's token (so GitHub signs it: a repo that requires signed commits accepts it),
 #      the branch on it, and the artifact. The commit the facts read must be in the history of the commit
 #      the run started from; a re-ship's and a patch's is the tip of the base. The checkout is never committed to or pushed from;
 #   4. upload the artifact: the files `branch`, `sha`, `title` and `body.md`.
 # A light release (input `profile: light`) skips the prep file and its lint: the cut makes the version from the day and writes
 # no CHANGELOG section or release notes (docs/how-we-release.md, "Light releases").
-# A re-ship (input `reship`) skips the prep file and the facts: the cut reads the version's own files
-# at the commit, checks its release PR merged and its ship run failed, and makes the branch again. Its
+# A re-ship (input `reship`) skips the prep file and the facts: the cut reads the merged release PR's
+# release data (its body), not the version's files, checks its release PR merged and its ship run failed, and makes the branch again. Its
 # input `fixes` names commits of the working branch, which the cut cherry-picks onto the branch.
 # It is started on the working branch like any cut (that is where the newest caller is, and where the
 # fleet's hook opens the PR from); its commit is the tip of the base the version merged into.

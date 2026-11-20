@@ -1,48 +1,50 @@
-# Writes the verdict and the audit record on a release PR, with the evidence committed on the
-# candidate (through GitHub's API, so the commit is signed), and "Do not approve" (a HOLD) when a test, a smoke step or a check did not pass.
+# Writes the verdict and the audit record on a release PR, and "Do not approve" (a HOLD) when a test, a
+# smoke step or a check did not pass. It commits nothing: the release PR's head stays the commit the cut
+# made, and the results stay in the release run's `results` artifact, which the page links.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
 # `v<major>` (`v0`), the tag each release moves to its own commit. See the README for the caller.
 #
 # The caller runs it when the release PR opens and each time the PR, a review or a check changes.
-# A review is the one change that pushes nothing: the repo's `main` ruleset dismisses an approval
-# when a commit is pushed, so a record that committed evidence after an approval would dismiss the
-# approval it came to record. With `review: true` the second job runs and the first does not. It
-# reads the evidence already committed on the candidate, the reviews and the checks, and writes the
-# body (`shipyard record --from-evidence --update`). Its token cannot push, it commits nothing, runs
-# no check again, and with no evidence at the head it writes HOLD with the reason. Its one other write
-# is the `shipyard/release` status below.
-# The release PR is a draft until the record has written a SHIP at its head, because an approval
-# before that cannot count: the evidence push dismisses it. The first pass makes the PR a draft
-# (`--draft-until-ship`), so a push to the candidate makes it one again; the pass that writes the
-# body marks it ready on SHIP and leaves it a draft on HOLD. A review run leaves it as it is. A
-# change of draft state that fails is a warning, never a failed record.
+# A review must never move the PR's head: the repo's `main` ruleset dismisses an approval when a
+# commit is pushed. With `review: true` the second job runs and the first does not. It has no
+# results of its own: it reads the release run the record already on the page names, uses it only
+# when that run is this release's (a run of this repo that completed with success, on the working
+# branch the cut commit names at the commit the cut was made from, or on the release branch at a
+# commit of the candidate; its `results` artifact not expired; its build the one that run made),
+# downloads its `results` and writes the body from them (`shipyard record --from-candidate --review
+# --update`), and writes HOLD naming what failed otherwise. A page that names no run (a release PR
+# recorded before the record stopped committing) is read from the evidence its head holds
+# (`shipyard record --from-evidence --update`), or HOLD with the reason. The review commits nothing,
+# runs no check again, and its one other write is the `shipyard/release` status below.
+# The release PR is a draft until the record has written a SHIP at its head, so an approval is not
+# asked for before the checks have run. The first pass makes the PR a draft (`--draft-until-ship`),
+# so a push to the candidate makes it one again; the pass that writes the body marks it ready on
+# SHIP and leaves it a draft on HOLD. A review run leaves it as it is. A change of draft state that
+# fails is a warning, never a failed record.
 # Each run reads GitHub as it is now and replaces the record already in the PR body, so a run
 # that comes late or twice leaves the same record. The facts and the prep file are the ones
-# `shipyard cut` committed to `releases/<tag>/` on the candidate, so the job needs only the PR's
-# number and the results of the build, the tests and staging.
+# `shipyard cut` put in the release PR's body, pinned by the cut commit, so the job needs only the
+# PR's number and the results of the build, the tests and staging.
 #
-# Steps: read the PR's branch; check it out; make the record and commit the evidence
-# (`shipyard record`: the commit is made by the API with the caller's token and the branch moved to it, a
-# fast-forward only, so a branch that moved is refused; the checkout holds no new commit yet); fetch that
-# commit into the checkout and fast-forward to it; wait for GitHub to show it as the PR's head; run the caller's required-check workflows
-# on it; wait for the other checks; report each dispatched run's jobs as commit statuses on the
-# pushed commit; delete the held runs that stand behind a finished run; write the body (`shipyard record --update`).
-# A push made with the job's own token starts no workflow that runs (GitHub holds its `pull_request`
-# runs for a person's approval), so this does not call itself, and the
-# checks the base branch's rules require would never run on the evidence commit. A
-# `workflow_dispatch` made with that token does start a run, so the job starts each workflow the
-# caller lists in `required-check-workflows` on the release branch, now at the pushed commit.
+# Steps: read the PR's branch; check it out; download the results; make the record and make the PR a
+# draft (`shipyard record`, which writes no body yet); run the caller's required-check workflows on the
+# PR's head; wait for the other checks; report each dispatched run's jobs as commit statuses on the
+# head; delete the held runs that stand behind a finished run; write the body (`shipyard record --update`).
+# GitHub holds the `pull_request` runs of a release branch the cut pushed with the job's own token for
+# a person's approval, so the checks the base branch's rules require would never run on the PR's head
+# by themselves. A `workflow_dispatch` made with that token does start a run, so the job starts each
+# workflow the caller lists in `required-check-workflows` on the release branch, at the PR's head.
 # GitHub does not count a `workflow_dispatch` run's checks for a required check of a ruleset, so
-# the job also posts each finished dispatched run's jobs as commit statuses on the pushed commit,
+# the job also posts each finished dispatched run's jobs as commit statuses on the head,
 # named as the checks are: a status reports a real run of the repo's tests on that exact commit,
 # and nothing is approved by hand. The held `pull_request` runs are never approved: the job deletes the
 # ones of the workflows it ran, and of any workflow that finished on the build's source commit (the
 # approver sees no run awaiting approval), and leaves the rest.
 #
-# The same step that writes the body sets one commit status, `shipyard/release`, on the PR's head (the
-# evidence commit, or the candidate when it has none), from the verdict the body shows: success for SHIP
+# The same step that writes the body sets one commit status, `shipyard/release`, on the PR's head,
+# from the verdict the body shows: success for SHIP
 # approved at that head with nothing else open, pending for SHIP with a step still open (a check still
 # running, a second approver) or with no approval of this head yet, failure for HOLD with the first reason
 # as its description. A review sets it again on the same head, so an approval turns it green with no push;
@@ -64,7 +66,7 @@ on:
         required: false
         default: ''
       review:
-        description: True when a review was submitted or dismissed. The record is read again from the evidence already committed on the candidate and only the PR body is written; nothing is committed, pushed or run again.
+        description: True when a review was submitted or dismissed. The record is read again from the results of the release run the record on the page names (or, for a release PR recorded before the record stopped committing, from the evidence its head holds) and only the PR body and its status are written; nothing is committed, pushed or run again.
         type: boolean
         required: false
         default: false
@@ -94,7 +96,7 @@ on:
         required: false
         default: '10'
       required-check-workflows:
-        description: Comma-separated file names of this repo's workflows (in .github/workflows) that make the checks the base branch's rules require, such as `ci.yml`. Each must accept `workflow_dispatch`. After the evidence push, each is run on the release branch, so its checks land on the PR's new head.
+        description: Comma-separated file names of this repo's workflows (in .github/workflows) that make the checks the base branch's rules require, such as `ci.yml`. Each must accept `workflow_dispatch`. Each is run on the release branch, so its checks land on the PR's head.
         type: string
         required: false
         default: ''
@@ -112,11 +114,11 @@ jobs:
       group: shipyard-record-${{ github.repository }}-${{ inputs.pr }}
       cancel-in-progress: false
     permissions:
-      contents: write        # make the evidence commit on the candidate through the API (the caller's token)
+      contents: read         # the candidate's history; the record commits nothing
       pull-requests: write   # write the record into the PR body
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
-      statuses: write        # read its commit statuses, post the dispatched runs' results as statuses on the evidence commit, and set `shipyard/release`
+      statuses: write        # read its commit statuses, post the dispatched runs' results as statuses on the PR's head, and set `shipyard/release`
       actions: write         # download the results artifact; run the required-check workflows; read the event of each check run's workflow run
       id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
     env:
@@ -224,8 +226,8 @@ jobs:
           gh run download "$RESULTS_RUN" --repo "$GITHUB_REPOSITORY" --name results --dir "$RUNNER_TEMP/results"
           [[ -f "$RUNNER_TEMP/results/results.json" ]] || { echo "::error title=Record::the artifact 'results' of run $RESULTS_RUN holds no results.json"; exit 1; }
 
-      # The first pass reads the candidate and commits the evidence on it; the body is not written yet.
-      - name: Make the record and commit the evidence
+      # The first pass reads the candidate and makes the PR a draft; the body is not written yet.
+      - name: Make the record
         shell: bash
         env:
           SHIPYARD_SHA: ${{ steps.self.outputs.sha }}
@@ -237,55 +239,17 @@ jobs:
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
           node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
-            --dir caller --out "$RUNNER_TEMP/record.md" --commit-out "$RUNNER_TEMP/evidence-commit" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
+            --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
 
-      # The evidence commit is made on the remote, so the checkout does not hold it yet. Fetch the branch
-      # and fast-forward to exactly that commit: every later step reads the checkout's head, which is then
-      # the PR's. The token goes to git as an environment setting, never as an argument or in the URL.
-      - name: Move the checkout to the evidence commit
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          BRANCH: ${{ steps.pr.outputs.branch }}
-        run: |
-          sha=$(cat "$RUNNER_TEMP/evidence-commit")
-          if [[ -z "$sha" ]]; then
-            echo 'The candidate already holds this evidence: no commit was made.'
-            exit 0
-          fi
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=Record::the evidence commit is not a commit id"; exit 2; }
-          server="${GITHUB_SERVER_URL:-https://github.com}"
-          header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
-          export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true GIT_CONFIG_COUNT=1 "GIT_CONFIG_KEY_0=http.${server%/}/.extraheader" "GIT_CONFIG_VALUE_0=$header"
-          git -C caller fetch --quiet origin "refs/heads/$BRANCH"
-          git -C caller merge --ff-only --quiet "$sha" \
-            || { echo "::error title=Record::$BRANCH does not hold the evidence commit ${sha:0:7} as a fast-forward of the checkout"; exit 2; }
-
-      # GitHub shows the new commit as the PR's head a moment later; the record refuses a PR whose
-      # head is not the checkout's. Bounded: two minutes.
-      - name: Wait for the PR to show the pushed commit
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          want=$(git -C caller rev-parse HEAD)
-          for _ in $(seq 1 24); do
-            have=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)
-            if [[ "$have" == "$want" ]]; then exit 0; fi
-            sleep 5
-          done
-          echo "::error title=Record::#$PR still shows ${have:0:7}, not the pushed ${want:0:7}, after two minutes"
-          exit 2
-
-      # The pushed commit got no checks: a push made with the job's own token starts no
+      # The PR's head may have no checks: a push made with a job's own token (the cut's) starts no
       # workflow that runs (its `pull_request` runs are held for approval and make no check).
       # A `workflow_dispatch` made with it does, so each listed workflow is run on the release
-      # branch, which is now at the pushed commit, and the checks it makes land on the PR's head.
+      # branch, which is at the PR's head, and the checks it makes land on that commit.
       # Every listed workflow must exist and be enabled before any is started, so a wrong name
       # starts none. One that already ran on this commit is not run again, so a run that comes
       # again starts nothing new; a run held for approval, cancelled or skipped did not run. Then wait, bounded (two minutes), for GitHub to show each run on
       # the commit, so the wait for the other checks below can see their checks.
-      - name: Run the required checks on the pushed commit
+      - name: Run the required checks on the PR's head
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -349,7 +313,7 @@ jobs:
           echo "::warning title=Record::after two minutes GitHub shows no run on ${head:0:7} of: ${missing[*]} (started on $BRANCH, which may have moved). See the PR's checks"
 
       # A check from another workflow may still be running when the record is read, and a running
-      # check never turns the recommendation. So wait, bounded, until the checks of the pushed head
+      # check never turns the recommendation. So wait, bounded, until the checks of the PR's head
       # and of the build's commit that are not this run's own, and not ignored, have finished.
       - name: Wait for the candidate's other checks
         shell: bash
@@ -382,9 +346,9 @@ jobs:
           done
 
       # GitHub does not count the checks of a `workflow_dispatch` run for a required check of a
-      # ruleset, even when they pass on the PR's head, and the `pull_request` runs of the pushed
-      # commit stay held for a person. So each job of the dispatched run is reported as a commit
-      # status on the head, named as the job's check is (`private-data`, `test`), in the state the
+      # ruleset, even when they pass on the PR's head, and the `pull_request` runs of a commit
+      # pushed with a job's own token stay held for a person. So each job of the dispatched run
+      # is reported as a commit status on the head, named as the job's check is (`private-data`, `test`), in the state the
       # job ended in, with the run's URL as its target. A status only ever reports a real run:
       # a `workflow_dispatch` run of a listed workflow, on this release branch, at this exact
       # head, that has finished. A run still going, held, cancelled or skipped, and a job that
@@ -474,16 +438,16 @@ jobs:
             done <<< "$jobs"
           done
 
-      # The push of the evidence made `pull_request` runs that GitHub holds for a person's approval
-      # ("awaiting approval from someone with write access"). The dispatched runs above did the work
-      # and their jobs are statuses now, and the evidence commit changes only the release notes, the
-      # changelog and the evidence, so a held run adds nothing but a button on the page the approver
-      # judges, and a red run in the history when the PR merges. So each held run at this head, made
-      # by the push (`github-actions[bot]`), is deleted when either
+      # The cut's push of the release branch made `pull_request` runs that GitHub holds for a person's
+      # approval ("awaiting approval from someone with write access"). The dispatched runs above did the
+      # work and their jobs are statuses now, and the cut commit changes only the changelog, so a held
+      # run adds nothing but a button on the page the approver judges, and a red run in the history
+      # when the PR merges. So each held run at this head, made by the push (`github-actions[bot]`),
+      # is deleted when either
       #   1. its workflow is listed and has a dispatched run on this branch at this head that
       #      finished with a result (the runs the statuses above were posted for), or
       #   2. the same workflow's `pull_request` run finished with a result on the build's source
-      #      commit (the head before the evidence push), on this branch. A run of this very record
+      #      commit (the commit the build was made from), on this branch. A run of this very record
       #      counts: the caller's own workflow is in progress while it clears its own held run.
       # Rule 2 reaches workflows the record did not run (a plan, the caller's own). A held run that
       # neither rule covers, or one a person made, stays: it may be the only sign that the workflow
@@ -509,9 +473,9 @@ jobs:
           fi
           head=$(git -C caller rev-parse HEAD)
           short=${head:0:7}
-          # The build's source: the head before the evidence push. Rule 2 needs it, and needs it to be in
-          # this commit's history (only that is checked here: that nothing but the notes, changelog and
-          # evidence changed since is the Same build row's judgement, and a record that fails it is HOLD).
+          # The build's source. Rule 2 needs it, and needs it to be in this commit's history (only that is
+          # checked here: that nothing but the notes and changelog changed since is the Same build row's
+          # judgement, and a record that fails it is HOLD).
           source=$(jq -r '.build.source // empty' "$RUNNER_TEMP/results/results.json" 2> /dev/null) || source=
           if [[ ! "$source" =~ ^[0-9a-f]{40}$ ]]; then
             warn "could not read the build's source, so a held run is cleared only for a workflow the record ran"
@@ -544,7 +508,7 @@ jobs:
               fi
               if (( ran > 0 )); then why="the dispatched run's checks are posted as statuses"; fi
             fi
-            # Rule 2: the workflow finished on the build's source (or is this run), and the evidence commit adds no code.
+            # Rule 2: the workflow finished on the build's source (or is this run), and the commits since add no code.
             if [[ -z "$why" && -n "$source" ]]; then
               onsrc=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$w/runs?head_sha=$source&event=pull_request&per_page=100" 2> /dev/null \
                 | jq -r --arg src "$source" --arg branch "$BRANCH" --arg this "${GITHUB_RUN_ID:-}" '[.workflow_runs[] | select(.head_sha == $src and .head_branch == $branch and .event == "pull_request" and ((.status == "completed" and (.conclusion | IN("success", "failure", "timed_out"))) or ((.id | tostring) == $this)))] | length' 2> /dev/null) || onsrc=
@@ -552,7 +516,7 @@ jobs:
                 warn "could not read the runs of $w on the build's source ${source:0:7}, so its held runs are left"
                 continue
               fi
-              if (( onsrc > 0 )); then why="$w finished on the build's source ${source:0:7} and the evidence commit changes only the notes, changelog and evidence"; fi
+              if (( onsrc > 0 )); then why="$w finished on the build's source ${source:0:7}, and the record holds the build since then to the notes and changelog"; fi
             fi
             if [[ -z "$why" ]]; then
               echo "$w has no finished run on $short from the record, nor on the build's source: its held runs are left."
@@ -586,12 +550,14 @@ jobs:
           node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
 
-  # A review: the same record, read again from what the candidate already holds. No evidence is
-  # made, nothing is pushed, no check is run again and no results artifact is read. The job is
-  # named `record` as the first is, so the caller's `ignore-checks` names its check too. Its group
-  # is its own, so a review never replaces a record waiting in the first job's group (a push's run
-  # must not be lost). A review that reads a head while that record is still pushing finds the PR
-  # moved when it writes, and is refused (`shipyard record` refuses a PR that moved while it read).
+  # A review: the same record, read again from the results of the release run the record on the
+  # page names, once that run is checked to be this release's; a page that names none is read from
+  # the evidence its head holds (a release PR recorded before the record stopped committing).
+  # Nothing is committed or pushed and no check is run again. The job is named `record` as the first
+  # is, so the caller's `ignore-checks` names its check too. Its group is its own, so a review never
+  # replaces a record waiting in the first job's group (a push's run must not be lost). A review
+  # that reads a head a push then moves finds the PR moved when it writes, and is refused
+  # (`shipyard record` refuses a PR that moved while it read).
   record-review:
     name: record
     if: ${{ inputs.review }}
@@ -601,11 +567,11 @@ jobs:
       group: shipyard-record-review-${{ github.repository }}-${{ inputs.pr }}
       cancel-in-progress: false
     permissions:
-      contents: read         # the candidate's committed evidence; this job cannot push
+      contents: read         # the candidate's history; this job cannot push
       pull-requests: write   # write the record into the PR body
       issues: read           # who wrote and armed each change's issue
       checks: read           # the candidate's check runs
-      actions: read          # the event of each check run's workflow run (a Dependabot or scheduled run is not judged)
+      actions: read          # the release run and its `results` artifact; the event of each check run's workflow run (a Dependabot or scheduled run is not judged)
       statuses: write        # read its commit statuses, and set `shipyard/release` on the head (the one write this job makes besides the body)
       id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
     env:
@@ -690,16 +656,53 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - name: Write the record into the PR body from the committed evidence
+      # The release run the record on the page names (`<!-- shipyard:release-run <id> -->`), or none.
+      # Whether it is this release's is checked when the record reads it, below.
+      - name: Find the release run the record names
+        id: run
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          node shipyard/bin/shipyard record --find-release-run --pr "$PR" --out "$RUNNER_TEMP/release-run"
+          run=$(cat "$RUNNER_TEMP/release-run")
+          [[ -z "$run" || "$run" =~ ^[1-9][0-9]*$ ]] || { echo "::error title=Record::the release run the record names is not a run id"; exit 2; }
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      # An artifact that has expired, or that the run never made, downloads nothing: the record then
+      # writes HOLD and says why, so a failed download is a warning here.
+      - name: Get the release run's results
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ steps.run.outputs.run }}
+        run: |
+          if [[ -z "$RUN" ]]; then
+            echo 'The record names no release run: the review reads the evidence the head holds, if any.'
+            exit 0
+          fi
+          if ! gh run download "$RUN" --repo "$GITHUB_REPOSITORY" --name results --dir "$RUNNER_TEMP/results"; then
+            echo "::warning title=Record::the artifact 'results' of run $RUN could not be downloaded: the record says why"
+          fi
+
+      - name: Write the record into the PR body for the review
         shell: bash
         env:
           SHIPYARD_SHA: ${{ steps.self.outputs.sha }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN: ${{ steps.run.outputs.run }}
         run: |
           args=()
           if [[ -n "$SHIPYARD_SHA" ]]; then args+=(--shipyard-sha "$SHIPYARD_SHA"); fi
           if [[ -n "$IGNORE_CHECKS" ]]; then args+=(--ignore-checks "$IGNORE_CHECKS"); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
-          node shipyard/bin/shipyard record --from-evidence --update --pr "$PR" \
-            --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
+          if [[ -n "$RUN" ]]; then
+            # The same record the build job writes, from the same results; it leaves the draft state alone.
+            node shipyard/bin/shipyard record --from-candidate --review --release-run "$RUN" --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
+              --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
+          else
+            node shipyard/bin/shipyard record --from-evidence --update --pr "$PR" \
+              --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
+          fi

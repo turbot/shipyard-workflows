@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read        # the release notes, the facts and the config at the merge commit
+      contents: read        # the config at the merge commit, and the cut commit the release data is checked against
       # The note that the line was posted is a comment on the release PR. GitHub allows a comment on a
       # pull request only with pull-requests write, whatever issues: write says: with read it answers 403.
       pull-requests: write  # the release PR, and the note on it that the line was posted

@@ -214,7 +214,7 @@
         "record": {
           "actions": "write",
           "checks": "read",
-          "contents": "write",
+          "contents": "read",
           "id-token": "write",
           "issues": "read",
           "pull-requests": "write",

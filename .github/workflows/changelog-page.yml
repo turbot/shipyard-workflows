@@ -10,8 +10,8 @@
 # The caller runs it as a job after `tag` has finished (needs: [ship, tag]), in its push-to-main workflow, beside Homebrew. Like
 # tag.yml it runs in the caller's `release` environment (docs/release-apps.md), which only main can use, and makes the area's
 # release App token there: for the one site repo alone, with contents and pull requests write. The App is installed on the site
-# repo too. Nothing here checks out the caller's repo or runs its code; the release PR, the notes and `.github/release.json` are read
-# from GitHub at the merge commit, and their text is data.
+# repo too. Nothing here checks out the caller's repo or runs its code; the release PR and `.github/release.json` at the merge
+# commit, and the notes in the release PR's body (checked against its cut commit), are read from GitHub, and their text is data.
 
 name: Changelog page
 
@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 15
     environment: release    # the caller's: RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY (docs/release-apps.md)
     permissions:
-      contents: read        # the release notes and the config at the merge commit, and this workflow's own commit
+      contents: read        # the config at the merge commit, the cut commit the notes are checked against, and this workflow's own commit
       pull-requests: read   # the release PR the merge commit belongs to
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
     steps:
