@@ -173,6 +173,20 @@
         }
       }
     },
+    "pr.yml": {
+      "inputs": [],
+      "secrets": [],
+      "jobs": {
+        "pr": {
+          "actions": "write",
+          "contents": "read",
+          "id-token": "write",
+          "issues": "write",
+          "pull-requests": "write",
+          "statuses": "write"
+        }
+      }
+    },
     "prep.yml": {
       "inputs": [
         "prep"

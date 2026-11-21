@@ -1,7 +1,8 @@
 # The ship job of a Go CLI whose Release carries its own files (docs/release-cli.md): at the merge of a release PR it builds the
-# release with goreleaser, the version set from the release PR and publishing skipped, and uploads the archives and `checksums.txt` as
-# the artifact the tag job attaches to the GitHub Release (tag.yml, input `assets`). Nothing is published here: the tag job
-# publishes the files, and homebrew.yml writes the formula after the tag.
+# release with goreleaser, the version set from the release PR and publishing skipped, and uploads every file `checksums.txt`
+# lists (the archives, and the Linux packages when the repo makes them) and `checksums.txt` as the artifact the tag job attaches
+# to the GitHub Release (tag.yml, input `assets`). Nothing is published here: the tag job publishes the files, and homebrew.yml
+# writes the formula after the tag.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
@@ -250,19 +251,44 @@ jobs:
           }
           goreleaser_run release --clean --skip=publish,announce,validate --config "$CONFIG"
 
-      # Only archives and checksums.txt go on the Release, flat, and each must be the one checksums.txt lists.
+      # The Release carries every file `checksums.txt` lists (archives, and the Linux packages nfpm makes), flat, and `checksums.txt`.
+      # Each listed file must be in dist/ and match its checksum; a file in dist/ that is not listed is left out.
       - name: Collect the release files
         if: ${{ steps.version.outputs.release == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/release-files"
+          dist=caller/dist
           mkdir -p "$out"
-          shopt -s nullglob
-          files=(caller/dist/*.tar.gz caller/dist/*.zip)
-          [ "${#files[@]}" -gt 0 ] || { echo "::error title=Go CLI ship::goreleaser made no archive in dist/"; exit 1; }
-          [ -f caller/dist/checksums.txt ] || { echo "::error title=Go CLI ship::goreleaser made no checksums.txt in dist/"; exit 1; }
-          cp "${files[@]}" caller/dist/checksums.txt "$out/"
+          [ -f "$dist/checksums.txt" ] || { echo "::error title=Go CLI ship::goreleaser made no checksums.txt in dist/"; exit 1; }
+          listed=()
+          n=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            n=$((n + 1))
+            [ -n "${line//[[:space:]]/}" ] || continue
+            # sha256sum's own format: a 64-digit hash, a space, a space or `*`, then the file's name. The name is never printed
+            # until it is known to be a plain one, so a line of the file cannot write a workflow command.
+            if [[ ! "$line" =~ ^[0-9a-fA-F]{64}\ [\ *](.+)$ ]]; then
+              echo "::error title=Go CLI ship::line $n of dist/checksums.txt is not a sha256sum line"; exit 1
+            fi
+            name="${BASH_REMATCH[1]}"
+            if [[ ! "$name" =~ ^[A-Za-z0-9._+@=~-]{1,255}$ ]]; then
+              echo "::error title=Go CLI ship::line $n of dist/checksums.txt names a file with a name a Release cannot carry (letters, digits and . _ + @ = ~ - only)"; exit 1
+            fi
+            listed+=("$name")
+          done < "$dist/checksums.txt"
+          [ "${#listed[@]}" -gt 0 ] || { echo "::error title=Go CLI ship::dist/checksums.txt lists no file"; exit 1; }
+          missing=0
+          for name in "${listed[@]}"; do
+            if [ ! -f "$dist/$name" ]; then
+              echo "::error title=Go CLI ship::dist/checksums.txt lists $name, and goreleaser made no such file in dist/"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          for name in "${listed[@]}"; do cp "$dist/$name" "$out/"; done
+          cp "$dist/checksums.txt" "$out/"
           (cd "$out" && sha256sum --check --strict checksums.txt)
 
       - name: Upload the release files

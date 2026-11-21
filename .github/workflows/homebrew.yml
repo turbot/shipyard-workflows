@@ -52,7 +52,7 @@ on:
         type: boolean
         default: false
       archive:
-        description: 'The archive''s file name, with {os} (darwin, linux) and {arch} (amd64, arm64) where they go; {name} is the binary and {version} the version. Default: {name}_{os}_{arch}.tar.gz.'
+        description: 'The archive''s file name, with {os} (darwin, linux) and {arch} (amd64, arm64) where they go; {name} is the binary and {version} the version, and {ext} stands for tar.gz or zip, whichever each platform''s file has (the Release must hold exactly one). Default: {name}_{os}_{arch}.tar.gz.'
         type: string
         default: ''
       test-args:
