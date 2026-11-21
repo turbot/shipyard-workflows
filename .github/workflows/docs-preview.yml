@@ -3,7 +3,8 @@
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
 # `v<major>` (`v0`), the tag each release moves to its own commit. A docs repo calls it on a
-# push to a branch other than main, and on a pull request (opened, synchronize, reopened):
+# push to a branch other than main, on a pull request (opened, synchronize, reopened), and from its
+# `release-pr.yml`, which runs as a `workflow_dispatch` on the release candidate `release/<version>`:
 #
 #   push           the `start` job makes a token of the caller's GitHub App for the site repo, and runs
 #                  the site's preview workflow on the site's default branch with `ref_name` set to the
@@ -12,6 +13,12 @@
 #                  `<site name> preview`, waits for the site's build of that push, and sets the deployment
 #                  to success with the preview's address, so the PR shows "deployed to <site name> preview"
 #                  with a "View deployment" button. A PR from a fork is skipped: its pushes start no build.
+#   workflow_dispatch  on a branch other than main, both jobs run, for the run's own branch and commit. The
+#                  cut makes `release/<version>` and opens its PR with the job's own token, and what that
+#                  token does starts no workflow, so the candidate gets no push or pull_request run. The
+#                  docs repo's `release-pr.yml` is started on that branch (open-release-pr does it), calls this
+#                  workflow, and so the candidate gets a preview and its PR the deployment. A dispatch needs
+#                  write access, as a push to a branch does. A dispatch on main starts nothing.
 #
 # It writes no comment and edits no PR body (its token holds neither issues nor pull-requests),
 # so a public docs repo never holds the PR for a bot's text. The App's private key is a secret
@@ -59,7 +66,7 @@ permissions: {}
 jobs:
   start:
     name: start
-    if: ${{ github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name != 'main' && !github.event.deleted }}
+    if: ${{ (github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name != 'main' && !github.event.deleted) || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref_name != 'main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -139,12 +146,12 @@ jobs:
 
   link:
     name: link
-    if: ${{ github.event_name == 'pull_request' && contains(fromJSON('["opened", "synchronize", "reopened"]'), github.event.action) && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ (github.event_name == 'pull_request' && contains(fromJSON('["opened", "synchronize", "reopened"]'), github.event.action) && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref_name != 'main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     permissions:
-      contents: read       # check out shipyard at the commit this workflow runs from, and read the PR head's commit date
-      deployments: write   # the deployment of the PR's head commit and its statuses
+      contents: read       # check out shipyard at the commit this workflow runs from, and read the PR head's (or the dispatch's) commit date
+      deployments: write   # the deployment of the PR's head commit (or the dispatch's commit) and its statuses
       id-token: write      # learn which commit of this workflow is running (job_workflow_sha)
     steps:
       - name: Check the inputs
@@ -224,6 +231,7 @@ jobs:
           PREFIX: ${{ inputs.branch-prefix }}
           PROJECT: ${{ inputs.vercel-project }}
           WAIT: ${{ inputs.wait }}
-          REF: ${{ github.event.pull_request.head.ref }}
-          SHA: ${{ github.event.pull_request.head.sha }}
+          # A PR's head, or, on a dispatch, the run's own branch and commit (the release PR's head is that commit).
+          REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
+          SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: node shipyard/bin/shipyard docs-preview link --site="$SITE" --prefix="$PREFIX" --project="$PROJECT" --ref="$REF" --sha="$SHA" --wait="$WAIT"

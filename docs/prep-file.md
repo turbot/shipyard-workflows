@@ -15,12 +15,12 @@ All text fields hold at least one character that is not a space. No field outsid
 | `level.reasons` | Why this level: a list of sentences, at least one. The first is the reason that sets the level, as short as it can be: the audit record shows it beside the level. |
 | `level.flags` | An answer for each read-first flag in the facts: a list of `{ "flag": "<id>", "answer": "<text>" }`. `flag` is the flag's `id` in the facts; `answer` is what the prep run found and what it means for the level. |
 | `groups` | The group of each PR in the range, under the six labels of the release notes or `Internal`: `Before you upgrade`, `Security`, `What's new`, `Improvements`, `Bug fixes`, `Requirements` and `Internal`, each a list of PR numbers. Every PR in the range is in exactly one group. A group with no PRs may be left out. A format 2 group becomes: `Added` is `What's new`, `Changed` is `Improvements` (`What's new` for a new thing a user can do), `Fixed` is `Bug fixes`, `Removed` is `Before you upgrade` when the PR has an `Update-Needs:` line and `What's new` when it has none, and `Security` stays `Security`. A dependency-only PR is `Security` when it fixes a CVE, `Improvements` when a user notices it and `Internal` otherwise. A PR that changes what a user needs in place is `Requirements`. The CHANGELOG section lists each PR's own line under its label, in this order, and leaves `Internal` out. |
-| `notes.title` | The title of the release notes: `<Product> v<version> - <the main point>`, with the product's own name (`Example Product`, not `Example Product CLI`), a space, a `v` straight before the version, a space, a hyphen, a space and the main point. A new cut refuses another shape (`title-shape`); whether the number is the release's is the release check's job. |
-| `notes.summary` | One sentence of 140 characters or fewer. |
+| `notes.title` | The title of the release notes: `<Product> v<version> - <the main point>`, with the product's own name (`Example Product`, not `Example Product CLI`), a space, a `v` straight before the version, a space, a hyphen, a space and the main point. A new cut refuses another shape (`title-shape`); whether the number is the release's is the release check's job. The main point is the best thing a user gets from the release ([Writing the release notes](#writing-the-release-notes)). |
+| `notes.summary` | One sentence of 140 characters or fewer, in the same voice as the title ([Writing the release notes](#writing-the-release-notes)). |
 | `notes.items` | The items of the release notes, the main point first: a list of `{ "kind": "<label>", "name": "<2 to 4 words>", "text": "<the item>", "covers": [<PR numbers>] }`, at least one. The order of the file never sets the order of the labels: the notes walk the six labels in order and keep the items of one label in file order. |
 | `notes.items[].kind` | The item's label, exactly one of the six: `Before you upgrade`, `Security`, `What's new`, `Improvements`, `Bug fixes`, `Requirements` (with a plain apostrophe in `What's new`). A note, a warning or a breaking change is `Before you upgrade`; "Enhancements" is `Improvements`; a security fix is `Security`, never `Bug fixes`. |
 | `notes.items[].name` | 2 to 4 words: the release notes show it as `- **<name>:** <text>`, and the #releases post as a bullet with the name in italics. Every item of a kind other than `Before you upgrade` has one. An item of that kind needs none, but the #releases post titles its action block with one (2 to 4 words). Only a new cut asks for names: the record and a re-ship read a prep file cut earlier, with no names, as it is. |
-| `notes.items[].text` | The item, 300 characters or fewer. Its first sentence stands alone, because the #releases post shows an item's name and that first sentence only. The text of a `Before you upgrade` item starts with its condition: `If your repo writes prep files, before its next cut: take who out of each change.` |
+| `notes.items[].text` | The item, 300 characters or fewer. Its first sentence stands alone and says what the reader gains ([Writing the release notes](#writing-the-release-notes)), because the #releases post shows an item's name and that first sentence only. The text of a `Before you upgrade` item starts with its condition: `If your repo writes prep files, before its next cut: take who out of each change.` |
 | `notes.items[].covers` | The PRs in the range the item is about, at least one. |
 | `notes.reference` | Optional. Lists of types for reference (policy types, controls, actions): a list of `{ "title": "<text>", "entries": ["<text>"] }`, at least one. The notes show them after the items, below a `---` line, each as a `### <title>` with one bullet for each entry: never as labels, and the #releases post leaves them out. |
 | `notes.reference[].title` | The list's title, 60 characters or fewer, such as `Policy types`. |
@@ -36,6 +36,45 @@ All text fields hold at least one character that is not a space. No field outsid
 | `report.duringDeploy` | Optional. What customers notice while the release goes out, one line of 15 words or fewer: `Each running workspace restarts once, 5 at a time: about 1 minute without queries`. The page shows it as its During the deploy row, only when it is set. Leave it out when customers notice nothing. |
 | `report.personSteps` | Optional, 2 at most. Each step after the merge that a named person runs or has agreed to run: a list of `{ "who": "<login>", "step": "<text>", "state": "to do" }`. `who` is the person's GitHub login with no `@`; the page writes their profile name, never an @mention. `shipyard cut` refuses a login GitHub has no name for (a mistyped login, or a person who has set none) and says which; a record written later, if the name has gone, shows the login and warns. `step` is what they do, starting with its verb and reading after their name: `applies the queue settings, the last step`. `state` is `to do` or `agreed`. The page shows each as an A person's step row: `⏳` for a step to do, `✅` for one agreed. |
 | `report.urgent` | Optional. `true` only on a patch cut from the production tag to fix something broken now: the page adds ` (urgent fix)` after the version in its heading, `## Example site 1.28.1 (urgent fix): the query editor works again`. The lint refuses `true` on a level that is not `patch`, on a first release, and on facts that are not a patch's (no `patch`). |
+
+## Writing the release notes
+
+The notes lead with what a user gains, and stay factual. Positive means order and emphasis, not euphemism: the title, the summary and the first items lead with the best real gain, and a removal is still called a removal. Make no claim the diff cannot back, and use no hype words (`hype-word`). The examples are Powerpipe v1.7.0, whose best news is that its server reloads when mods change, and which deprecated two run flags. An item is shown as its name, a colon, then its text.
+
+### The title
+
+The main point is the best thing a user gets from this release, in a few words. It is never a removal or deprecation, unless the release is only that (`title-removal`). An action needs no title: `Before you upgrade` is always labelled and shown.
+
+- Good: `Powerpipe v1.7.0 - the server reloads when your mods change`
+- Not good: `Powerpipe v1.7.0 - runs no longer install mods` (it leads with a deprecation, while the release's best news is the live reload)
+
+### The summary
+
+One sentence in the same voice as the title: the best gain first, then the rest.
+
+- Good: `Your server picks up mod installs, updates and uninstalls without a restart, and two run flags are deprecated.`
+- Not good: `Runs no longer install mods, and the server can reload.` (it leads with what is gone)
+
+### An item's first sentence
+
+It says what the reader gains, in the second person (you, your), with a concrete case. The #releases post shows only that sentence. The mechanism comes after. It never leads with what no longer happens (`item-gain-first`).
+
+- Good: `Live mod reloads: Install, update or uninstall a mod and your running server picks it up, with no restart. It watches the mods in its workspace folder.`
+- Not good: `Live mod reloads: The server reloads when mods are installed, updated or uninstalled in its workspace folder.` (it says what the code does, not what the reader gains)
+
+### A removal or deprecation
+
+It is called what it is ("deprecated", "removed"), in its own item of kind `What's new`, with a one-clause reason when that helps and the replacement named. It is never dressed up as a feature, and never the headline. When its PR has an `Update-Needs:` line, the action is a second item, under `Before you upgrade`.
+
+- Good: `Deprecated run flags: --mod-install and --pull on benchmark, control, dashboard and detection runs are deprecated, and ignored with a warning. They never worked reliably: a missing mod failed before the install could help, and --pull updated mods one run late. Use powerpipe mod install or powerpipe mod update instead.`
+- Not good: `Safer mod locks: Your runs now leave the mod lock file alone.` (a deprecation dressed up as a feature: it never says the flags are deprecated, or what to use instead)
+
+### Before you upgrade
+
+It stays factual and short, starts with its condition (`step-condition`), and says why the new way is better.
+
+- Good: `Update mods before runs: If you pass --pull to a run command to update mods, run powerpipe mod update before the run instead. It updates them before the run reads them, not one run late.`
+- Not good: `Update mods before runs: If you use --pull, note that it is deprecated in this release and that the run commands have changed how they handle mods.` (no replacement, and no reason the new way is better)
 
 ## How the release PR shows it
 
@@ -67,9 +106,9 @@ A short file:
   "groups": { "Bug fixes": [103] },
   "notes": {
     "title": "Example Product v1.4.3 - dates past midnight show correctly",
-    "summary": "Run dates now show correctly across midnight.",
+    "summary": "Your run dates now show correctly across midnight.",
     "items": [
-      { "kind": "Bug fixes", "name": "Midnight runs fixed", "text": "Runs that cross midnight show the day they started.", "covers": [103] }
+      { "kind": "Bug fixes", "name": "Midnight runs fixed", "text": "Your runs that cross midnight show the day they started.", "covers": [103] }
     ]
   },
   "report": {
@@ -106,10 +145,10 @@ Every item is `Bug fixes`, so the notes show the bullets and no label.
 ```json
 {
   "title": "Example Product v1.4.3 - dates past midnight show correctly",
-  "summary": "Run dates now show correctly across midnight, and two other bugs are fixed.",
+  "summary": "Your run dates now show correctly across midnight, and two other bugs are fixed.",
   "items": [
-    { "kind": "Bug fixes", "name": "Midnight runs fixed", "text": "Runs that cross midnight show the day they started. Before, they showed the day they ended.", "covers": [103] },
-    { "kind": "Bug fixes", "name": "Search page crash", "text": "The search page no longer stops when a query holds a quote mark.", "covers": [104] },
+    { "kind": "Bug fixes", "name": "Midnight runs fixed", "text": "Your runs that cross midnight show the day they started. Before, they showed the day they ended.", "covers": [103] },
+    { "kind": "Bug fixes", "name": "Search page crash", "text": "Your searches with a quote mark in them now return results. Before, the search page stopped.", "covers": [104] },
     { "kind": "Bug fixes", "name": "Export file names", "text": "An exported report keeps the name you gave it.", "covers": [105] }
   ]
 }
@@ -118,10 +157,10 @@ Every item is `Bug fixes`, so the notes show the bullets and no label.
 ```markdown
 # Example Product v1.4.3 - dates past midnight show correctly
 
-Run dates now show correctly across midnight, and two other bugs are fixed.
+Your run dates now show correctly across midnight, and two other bugs are fixed.
 
-- **Midnight runs fixed:** Runs that cross midnight show the day they started. Before, they showed the day they ended.
-- **Search page crash:** The search page no longer stops when a query holds a quote mark.
+- **Midnight runs fixed:** Your runs that cross midnight show the day they started. Before, they showed the day they ended.
+- **Search page crash:** Your searches with a quote mark in them now return results. Before, the search page stopped.
 - **Export file names:** An exported report keeps the name you gave it.
 ```
 
@@ -132,9 +171,9 @@ One item, and it is `Security`: the label shows although every item has the same
 ```json
 {
   "title": "Example Product v1.4.4 - a session leak is closed",
-  "summary": "A fix keeps session tokens out of the debug logs.",
+  "summary": "A fix keeps your session tokens out of the debug logs.",
   "items": [
-    { "kind": "Security", "name": "Session tokens stay private", "text": "Debug logs no longer hold session tokens. If you turned debug logs on before this release, delete the old ones.", "covers": [201] }
+    { "kind": "Security", "name": "Session tokens stay private", "text": "Your session tokens stay out of the debug logs. If you turned debug logs on before this release, delete the old ones.", "covers": [201] }
   ]
 }
 ```
@@ -142,27 +181,28 @@ One item, and it is `Security`: the label shows although every item has the same
 ```markdown
 # Example Product v1.4.4 - a session leak is closed
 
-A fix keeps session tokens out of the debug logs.
+A fix keeps your session tokens out of the debug logs.
 
 ## Security
 
-- **Session tokens stay private:** Debug logs no longer hold session tokens. If you turned debug logs on before this release, delete the old ones.
+- **Session tokens stay private:** Your session tokens stay out of the debug logs. If you turned debug logs on before this release, delete the old ones.
 ```
 
 #### Example: mixed kinds, every label in order
 
-Five kinds, written out of order in the file. The notes show the labels in the fixed order, each with its items, then the `reference` block under a rule. The #releases post shows the `Before you upgrade` item as its action block and each other item's name and first sentence; it shows no labels and no reference lists.
+Five kinds, written out of order in the file. The notes show the labels in the fixed order, each with its items, then the `reference` block under a rule. The #releases post shows the `Before you upgrade` item as its action block and each other item's name and first sentence; it shows no labels and no reference lists. The removed option has its own item under `What's new`, and the step it asks for is under `Before you upgrade`.
 
 ```json
 {
   "title": "Example Product v1.5.0 - reports download as spreadsheets",
-  "summary": "Any report downloads as a spreadsheet, the search page loads faster and a date bug is fixed.",
+  "summary": "You can download any report as a spreadsheet, the search page loads faster and a date bug is fixed.",
   "items": [
-    { "kind": "Bug fixes", "name": "Midnight runs fixed", "text": "Runs that cross midnight show the day they started.", "covers": [103] },
-    { "kind": "Requirements", "name": "Newer runtime needed", "text": "Example Product now needs version 20 of its runtime or newer.", "covers": [112] },
-    { "kind": "Improvements", "name": "Faster search page", "text": "The search page opens twice as fast on large projects. Nothing changes in how it looks.", "covers": [110] },
-    { "kind": "Before you upgrade", "name": "Rename the export option", "text": "If a script calls the export with --csv, use --format csv instead: the old option is removed.", "covers": [108] },
-    { "kind": "What's new", "name": "Spreadsheet downloads", "text": "Any report downloads as a spreadsheet from its page.", "covers": [101] }
+    { "kind": "Bug fixes", "name": "Midnight runs fixed", "text": "Your runs that cross midnight show the day they started.", "covers": [103] },
+    { "kind": "Requirements", "name": "Newer runtime needed", "text": "You need version 20 of the runtime or newer to run Example Product.", "covers": [112] },
+    { "kind": "Improvements", "name": "Faster search page", "text": "Your search page opens twice as fast on large projects. Nothing changes in how it looks.", "covers": [110] },
+    { "kind": "Before you upgrade", "name": "Rename the export option", "text": "If a script of yours calls the export with --csv, use --format csv instead. One option now names every format.", "covers": [108] },
+    { "kind": "What's new", "name": "CSV option removed", "text": "The export's --csv option is removed. Use --format csv, which does the same.", "covers": [108] },
+    { "kind": "What's new", "name": "Spreadsheet downloads", "text": "You can download any report as a spreadsheet from its page.", "covers": [101] }
   ],
   "reference": [
     { "title": "Report types", "entries": ["Monthly summary", "Run history", "Search usage"] },
@@ -174,27 +214,28 @@ Five kinds, written out of order in the file. The notes show the labels in the f
 ```markdown
 # Example Product v1.5.0 - reports download as spreadsheets
 
-Any report downloads as a spreadsheet, the search page loads faster and a date bug is fixed.
+You can download any report as a spreadsheet, the search page loads faster and a date bug is fixed.
 
 ## Before you upgrade
 
-- **Rename the export option:** If a script calls the export with --csv, use --format csv instead: the old option is removed.
+- **Rename the export option:** If a script of yours calls the export with --csv, use --format csv instead. One option now names every format.
 
 ## What's new
 
-- **Spreadsheet downloads:** Any report downloads as a spreadsheet from its page.
+- **CSV option removed:** The export's --csv option is removed. Use --format csv, which does the same.
+- **Spreadsheet downloads:** You can download any report as a spreadsheet from its page.
 
 ## Improvements
 
-- **Faster search page:** The search page opens twice as fast on large projects. Nothing changes in how it looks.
+- **Faster search page:** Your search page opens twice as fast on large projects. Nothing changes in how it looks.
 
 ## Bug fixes
 
-- **Midnight runs fixed:** Runs that cross midnight show the day they started.
+- **Midnight runs fixed:** Your runs that cross midnight show the day they started.
 
 ## Requirements
 
-- **Newer runtime needed:** Example Product now needs version 20 of its runtime or newer.
+- **Newer runtime needed:** You need version 20 of the runtime or newer to run Example Product.
 
 ---
 
@@ -278,6 +319,9 @@ The flag's id is `caller-needs-<workflow>-<kind>-<name>`, with the job after the
 - the top of the page, rendered as the cut writes it with every row the record can add, has over 25 lines (`top-too-long`), a paragraph or a bullet over 25 words (`paragraph-too-long`), or a table cell over 15 words (`cell-too-long`). What is counted is what the page renders: a Now cell holds `after`, and the undo row the version the tool names. A blank line and a table's alignment row are not lines;
 - an item of kind `Before you upgrade` has a `text` that does not start with `If`, `When`, `Before`, `Once` or `Only`, in any case (`step-condition`): the #releases post shows it as "Action needed" and it says who must act and when. A prep cut earlier is read as it is;
 - a new cut's `notes.title` is not `<Product> v<version> - <the main point>`, with the product's own name from the facts (`title-shape`): a missing `v`, the product's name changed or a missing main point. The number itself is the release check's job;
+- a new cut's `notes.title` has a main point that leads with a removal or deprecation (`no longer`, `removed`, `removes`, `removal`, `deprecated`, `deprecates`, `deprecation`, `drops`, `dropped`) while at least one item is news (`title-removal`): the title is the best thing a user gets from the release, and the removal has its own item. A release that is only removals, with its action under `Before you upgrade`, keeps a removal title. A prep cut earlier is read as it is;
+- a new cut's item, other than `Before you upgrade` and other than a removal or deprecation item, whose first sentence has no word addressed to the reader (`you`, `your`, `yours`, `yourself`, `yourselves`, `you're`, `you'll`, `you've`, `you'd`) or leads with `no longer` (`item-gain-first`): the #releases post shows only the first sentence, so it says what the reader gains, to them, and the mechanism comes after. A prep cut earlier is read as it is;
+- a new cut's notes title, summary, item name or item text that holds a word that sells instead of telling, such as `amazing`, `seamless`, `blazing` or `game-changing` (`hype-word`): the notes stay factual, and a fact can be "faster". A prep cut earlier is read as it is;
 - an item's `kind` is not one of the six labels, or `notes.items` is empty (`schema`);
 - an item of the release notes of a kind other than `Before you upgrade` has no `name` (`item-name-missing`), a `name` of fewer than 2 or more than 4 words (`item-name-length`), or a `text` over 300 characters (`item-text-too-long`);
 - the release notes (title, summary, an item's name or text, a reference title or an entry) hold:

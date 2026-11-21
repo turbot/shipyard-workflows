@@ -291,6 +291,19 @@
         }
       }
     },
+    "release-version.yml": {
+      "inputs": [
+        "automation-logins"
+      ],
+      "secrets": [],
+      "jobs": {
+        "release": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        }
+      }
+    },
     "secret-scan.yml": {
       "inputs": [],
       "secrets": [],

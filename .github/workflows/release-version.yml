@@ -1,0 +1,121 @@
+# The step a repo's ship workflow runs first: it answers whether a push to `main` is a release, and with which version, tag and
+# build digest. It answers what the tag step answers, because both call the same decision (`shipyard release-version`, which
+# asks `releaseOfPush`): a push this step calls a release is one the tag tags once the ship passes, and one it refuses the tag
+# refuses. A push that is no release says `release=false` and a ship's own jobs, gated on it, are skipped.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit.
+#
+# A caller runs it as the first job of its push-to-main workflow; the repo's own jobs `need` it and run when `release` is
+# `true`, then `tag` (needs: the repo's last job). See docs/release-version.md.
+#
+# It runs no code of the caller's, checks nothing of the caller's out and holds no key: a read-only token and the release PR
+# it finds from the merge commit. Nothing a caller passes is put into a shell line: each input reaches a step as an
+# environment variable and is checked there.
+
+name: Release version
+
+on:
+  workflow_call:
+    inputs:
+      automation-logins:
+        description: 'The accounts that open release PRs, comma-separated (the same as the tag job''s). Required: a merged release/ PR from any other account is refused, not passed as no release.'
+        type: string
+        required: true
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        default: v
+    outputs:
+      release:
+        description: true when the push is the merge of a release PR, false when the push is no release.
+        value: ${{ jobs.release.outputs.release }}
+      version:
+        description: The release's version, when release is true. Empty when it is not.
+        value: ${{ jobs.release.outputs.version }}
+      tag:
+        description: The release's tag, when release is true. Empty when it is not.
+        value: ${{ jobs.release.outputs.tag }}
+      pr:
+        description: The number of the release PR, when release is true. Empty when it is not.
+        value: ${{ jobs.release.outputs.pr }}
+      build-digest:
+        description: The build digest the release's audit record holds, when release is true. Empty when it is not, and empty when the record holds none.
+        value: ${{ jobs.release.outputs.build-digest }}
+
+permissions: {}
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read        # this workflow's own commit, the cut commit and its releases/ files at the merge commit
+      pull-requests: read   # the release PR the merge commit belongs to
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      pr: ${{ steps.version.outputs.pr }}
+      build-digest: ${{ steps.version.outputs.digest }}
+    steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+        run: |
+          fail() { echo "::error title=Release version::$1"; exit 2; }
+          [ -n "${AUTOMATION_LOGINS//[[:space:],]/}" ] || fail 'automation-logins names no account: name the accounts that open release PRs'
+          [[ "$TAG_PREFIX" =~ ^[A-Za-z0-9._-]*$ ]] || fail 'tag-prefix may hold only letters, digits, dot, underscore and hyphen'
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/release-version.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows release-version.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Release version::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The release is the release PR's, found from the merge commit by the tag step's own decision. A push that is no release
+      # says so; a release PR that breaks a rule fails this step, and the tag refuses the same push.
+      - name: Find the release
+        id: version
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+        run: node shipyard/bin/shipyard release-version --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS"

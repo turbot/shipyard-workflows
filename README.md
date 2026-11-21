@@ -26,8 +26,13 @@ Nothing is written here by hand. The repository's rules let only the publish job
 Call a workflow at `v0` while the version is 0.x, and at `v1` from 1.0.0:
 
 ```yaml
+permissions: {}
 jobs:
   changelog-line:
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
     uses: turbot/shipyard-workflows/.github/workflows/changelog-line.yml@v0
 ```
 
