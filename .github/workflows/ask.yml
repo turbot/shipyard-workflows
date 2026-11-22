@@ -6,7 +6,8 @@
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
 # `v0`. docs/release-ask.md has the caller, which runs from one trigger, or two for a CLI:
 #
-#   workflow_run        the repo's record workflow finished: the ask, for the release PR that run names
+#   workflow_run        the repo's record workflow finished: the ask, for the release PR that run names (a record run started by
+#                       hand names none, so the caller passes the run's head branch and the ask finds the PR from it)
 #   workflow_dispatch   (a CLI) by name with the release PR's number: the record starts it when it writes SHIP, because a
 #                       CLI's release PR is opened with the job's token and GitHub makes no workflow_run for that
 #
@@ -36,6 +37,11 @@ on:
     inputs:
       pr:
         description: The release PR's number, from the record run that just finished. Leave it empty to look at every open release PR of the repo (a record run that names none).
+        type: string
+        required: false
+        default: ''
+      head-branch:
+        description: The head branch of the record run that just finished (the caller passes the run's `head_branch`). Used only when `pr` is empty, as with a record run started by hand, which names no release PR or a wrong one. A release branch (`release/X.Y.Z`) asks about that branch's open PR; any other branch, or none, looks at every open release PR.
         type: string
         required: false
         default: ''
@@ -74,6 +80,7 @@ jobs:
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
     env:
       PR: ${{ inputs.pr }}
+      HEAD_BRANCH: ${{ inputs.head-branch }}
       FLEET_LOGINS: ${{ inputs.fleet-logins }}
       ARMED_LABEL: ${{ inputs.armed-label }}
     steps:
@@ -139,7 +146,11 @@ jobs:
         run: |
           # The job's own comments carry the Actions bot's login, which `GET /user` cannot tell, so `--note-author` says which notes are its own.
           args=(--note-author 'github-actions[bot]' --armed-label "$ARMED_LABEL")
-          if [[ -n "$PR" ]]; then args+=(--pr "$PR"); else args+=(--all); fi
+          # The release PR: the number the caller gives, else the PR of the record run's release branch, else every open release PR.
+          # A record run started by hand names no PR, or one that has nothing to do with the release, but a release branch it ran on is the release's.
+          if [[ -n "$PR" ]]; then args+=(--pr "$PR")
+          elif [[ "$HEAD_BRANCH" =~ ^release/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then args+=(--head-branch "$HEAD_BRANCH")
+          else args+=(--all); fi
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
           rc=0
           node shipyard/bin/shipyard ask "${args[@]}" || rc=$?

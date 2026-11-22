@@ -1,6 +1,8 @@
 # Opens the release PR for a repo the fleet's release-PR hook does not serve (docs/release-cli.md). It takes the `release-pr`
 # artifact `cut.yml` uploaded in the same run, opens the PR into the base branch, and starts the repo's record workflow on the
-# release branch, because a PR made with the job's own token starts no workflow of its own.
+# release branch, because a PR made with the job's own token starts no workflow of its own. It also sets the PR to auto-merge with
+# a merge commit, so approval is the only person's step: GitHub merges the PR once it is approved and `shipyard/release` is green.
+# A repo whose `allow_auto_merge` setting is off (the owner's) gets a warning in the log and a PR a person merges.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
@@ -32,7 +34,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read        # this workflow's own commit
-      pull-requests: write  # open the release PR
+      pull-requests: write  # open the release PR, and turn on its auto-merge
       actions: write        # download the cut's artifact, and start the record workflow
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
     steps:

@@ -243,8 +243,12 @@ jobs:
       - name: Cut the release
         shell: bash
         env:
+          SHIPYARD_SHA: ${{ steps.self.outputs.sha }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          # The commit of this Shipyard goes into the release data, so a later step can tell which Shipyard cut the release.
+          shipyard=()
+          if [[ -n "$SHIPYARD_SHA" ]]; then shipyard=(--shipyard-sha "$SHIPYARD_SHA"); fi
           # The branch this run started on is the work branch the candidate comes from: the cut commit
           # records it, and the merge-back after the tag reads it. A run on a tag records none.
           work=()
@@ -259,7 +263,7 @@ jobs:
             fixes=()
             if [[ -n "$FIXES" ]]; then fixes=(--fixes "$FIXES"); fi
             node shipyard/bin/shipyard cut --reship "$RESHIP" --tag-prefix "$TAG_PREFIX" --repo "$GITHUB_REPOSITORY" \
-              --dir caller --out "$RUNNER_TEMP/release/release-pr" --changelog "$CHANGELOG" "${work[@]}" "${fixes[@]}"
+              --dir caller --out "$RUNNER_TEMP/release/release-pr" --changelog "$CHANGELOG" "${work[@]}" "${fixes[@]}" "${shipyard[@]}"
             exit 0
           fi
           if [[ -n "$PROFILE" ]]; then
@@ -270,7 +274,7 @@ jobs:
             if [ "$GITHUB_REF_TYPE" = "branch" ]; then within="origin/$GITHUB_REF_NAME"; fi
             node shipyard/bin/shipyard cut \
               --facts "$RUNNER_TEMP/release/facts.json" \
-              --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --within "$within" "${work[@]}"
+              --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --within "$within" "${work[@]}" "${shipyard[@]}"
             exit 0
           fi
           if [[ "$PATCH" = true ]]; then
@@ -278,12 +282,12 @@ jobs:
             # that tip, in place of --within, and picks the fixes the facts name after the cut commit.
             node shipyard/bin/shipyard cut \
               --facts "$RUNNER_TEMP/release/facts.json" --prep "$RUNNER_TEMP/release/prep.json" \
-              --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" "${work[@]}"
+              --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" "${work[@]}" "${shipyard[@]}"
             exit 0
           fi
           node shipyard/bin/shipyard cut \
             --facts "$RUNNER_TEMP/release/facts.json" --prep "$RUNNER_TEMP/release/prep.json" \
-            --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" --within "$GITHUB_SHA" "${work[@]}"
+            --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" --within "$GITHUB_SHA" "${work[@]}" "${shipyard[@]}"
 
       # The four files the hook reads, and no others.
       - name: Upload the release-pr artifact
