@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read        # check out the base branch's .github/release.json
-      pull-requests: write  # write the line on a Dependabot PR
+      pull-requests: read   # read the PR and its files; nothing is written to a PR
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
     steps:
       # The base branch, never the PR's head: a PR cannot edit the terms it is checked against.

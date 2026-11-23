@@ -384,6 +384,7 @@ jobs:
       # was skipped, post nothing, so the check stays missing and the PR stays blocked. A job that
       # failed posts a failure. Each run is waited for, bounded by `check-wait-minutes`; run this
       # again after one that ran longer: a status already posted for the same run is not posted twice.
+      # A listed workflow that ran on the head by itself (the record dispatched nothing) is not waited for: its own checks stand.
       - name: Report the dispatched runs as commit statuses
         shell: bash
         env:
@@ -405,7 +406,16 @@ jobs:
           # Each run is waited for, bounded by the same minutes as the other checks: it may not be shown
           # yet, or still going, when the wait above ends.
           deadline=$((SECONDS + 60 * WAIT_MINUTES))
+          # Sets `byself` to the number of runs of workflow $1 on the head that the record did not start
+          # and that ran (not held for approval, cancelled or skipped): the workflow ran on its own.
+          ran_by_itself() {
+            byself=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$1/runs?head_sha=$head&per_page=100" \
+              --jq '[.workflow_runs[] | select(.event != "workflow_dispatch" and (.conclusion as $c | ["action_required", "cancelled", "skipped"] | index($c) | not))] | length') \
+              || fail "could not read the runs of the required-check workflow $1"
+            [[ "$byself" =~ ^[0-9]+$ ]] || fail "GitHub did not say how many runs the required-check workflow $1 has"
+          }
           for w in "${workflows[@]}"; do
+            standing=
             while :; do
               # The newest `workflow_dispatch` run of this workflow on the release branch at the head.
               runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$w/runs?head_sha=$head&event=workflow_dispatch&per_page=100") \
@@ -419,9 +429,18 @@ jobs:
                 IFS=$'\t' read -r id status conclusion url <<< "$run"
                 if [[ "$status" == completed ]]; then break; fi
               fi
+              # The record started none and the workflow ran by itself: its own checks stand, so do not wait.
+              if [[ -z "$run" ]]; then
+                ran_by_itself "$w"
+                if (( byself > 0 )); then standing=1; break; fi
+              fi
               if (( SECONDS >= deadline )); then break; fi
               sleep 15
             done
+            if [[ -n "$standing" ]]; then
+              echo "$w already ran on $short without the record starting it: its own checks stand, so no status is posted."
+              continue
+            fi
             if [[ -z "$run" ]]; then
               echo "::warning title=Record::no workflow_dispatch run of $w on $short, so no status is posted for its checks"
               continue

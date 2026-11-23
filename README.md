@@ -31,7 +31,7 @@ jobs:
   changelog-line:
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
       id-token: write
     uses: turbot/shipyard-workflows/.github/workflows/changelog-line.yml@v0
 ```

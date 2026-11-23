@@ -7,12 +7,13 @@
 # its own copy of the steps. The job:
 #
 #   - refuses a branch name outside `^[A-Za-z0-9._/-]+$` (and one git would not take), and writes nothing;
-#   - makes an empty commit on the tip of the site's default branch, authored and committed by
-#     github-actions[bot];
+#   - makes an empty commit on the tip of the site's default branch through GitHub's API, naming
+#     no author or committer, so GitHub makes it as github-actions[bot] (the job's GITHUB_TOKEN)
+#     and signs it;
 #   - creates the branch `docs/<branch-prefix><ref-name>` at that commit, or moves it when it is there.
 #
-# Vercel's Git integration then builds that branch as the preview. It refuses a commit whose author
-# is a person outside the Vercel team and builds a bot's, so no Vercel token is needed.
+# Vercel's Git integration then builds that branch as the preview. It blocks an unsigned commit and
+# builds the bot's signed one, so no Vercel token is needed.
 #
 # The caller grants `contents: write` (the job's GITHUB_TOKEN writes the branch) and
 # `id-token: write` (the job learns which commit of this workflow is running, to check out

@@ -35,7 +35,7 @@
         "changelog-line": {
           "contents": "read",
           "id-token": "write",
-          "pull-requests": "write"
+          "pull-requests": "read"
         }
       }
     },
@@ -178,11 +178,9 @@
       "secrets": [],
       "jobs": {
         "pr": {
-          "actions": "write",
           "contents": "read",
           "id-token": "write",
-          "issues": "write",
-          "pull-requests": "write",
+          "pull-requests": "read",
           "statuses": "write"
         }
       }

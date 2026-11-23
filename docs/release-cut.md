@@ -42,7 +42,7 @@ A PR is a commit on the first-parent line of the range whose subject ends `(#12)
 | `range.from`, `range.fromCommit`, `range.to` | The tag the range starts at (for a first release, the `from` of `firstRelease`), the commit it points at, and the commit the range ends at (a full id). |
 | `firstRelease` | Only for a first release: `from` and `version`, as the repo's `.github/release.json` names them. The version is set, not counted. |
 | `prs[].number`, `title`, `url`, `author`, `mergedAt`, `commit` | The PR, and the commit of the range it came in. |
-| `prs[].changelog` | The PR's one `Changelog:` line, unchanged, or `null` when it has none or more than one. |
+| `prs[].changelog` | The PR's one `Changelog:` line, unchanged, or `null` when it has none or more than one. A Dependabot PR with no `Changelog:` line in its body has the line made from its title ("Bump x from 1 to 2" gives `Bump x from 1 to 2.`); a line in the body wins. |
 | `prs[].updateNeeds` | The PR's one `Update-Needs:` line, or `null`. |
 | `prs[].issues` | The issues the PR closes or refers to (`Fixes #1`, `Refs #2`), in this repo. |
 | `prs[].review` | `state` (`approved`, `changes-requested` or `none`), `approvedBy` and `changesRequestedBy`: each reviewer's last say counts, a dismissal clears it, a comment decides nothing. |

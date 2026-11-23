@@ -36,13 +36,14 @@ jobs:
       (github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == 'develop')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Only what the steps below use. The caller grants more (issues: write and actions: write, for layer 2's comment
+    # commands); a called job may ask for less, so the token holds nothing a step here does not need. A test
+    # (test/pr-permissions.test.js) fails when this list asks for a permission no step uses.
     permissions:
-      contents: read        # check out the base branch's .github/release.json
-      pull-requests: write  # write the line on a Dependabot PR
-      issues: write         # the comment replies of layer 2; the caller grants it, nothing here uses it yet
-      statuses: write       # post the commit status shipyard/changelog-line
-      actions: write        # layer 2's /shipped starts shipyard.yml; nothing here uses it yet
-      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+      contents: read        # "Check out the repo's release config", and the sweep's read of each base branch's release.json
+      pull-requests: read   # both changelog-line steps read the PR and its files, and the sweep lists the open PRs; nothing is written to a PR
+      statuses: write       # both changelog-line steps post the commit status shipyard/changelog-line
+      id-token: write       # "Find this workflow's commit" asks for an OIDC token to learn job_workflow_sha
     steps:
       # The base branch, never the PR's head: a PR cannot edit the terms it is checked against.
       - name: Check out the repo's release config
