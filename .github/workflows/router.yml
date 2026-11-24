@@ -11,17 +11,20 @@
 #   dispatch `gate`                     the release gate (release-gate.yml), on `main`
 #   dispatch `ask`                      the Slack ask (ask.yml), on the default branch
 #   push to a release branch            ship by kind (a go-cli's, go-cli-ship.yml), then tag (tag.yml), then the merge-back
-#                                       (merge-back.yml), the announcement (announce.yml) and the repo's `afterShip` workflows
-#   dispatch `shipped`                  the tag (tag.yml) for a `/shipped` comment, on the release PR's base branch
+#                                       (merge-back.yml), a go-cli's Homebrew formula (homebrew.yml), the changelog page, the
+#                                       announcement (announce.yml) and the repo's `afterShip` workflows
+#   dispatch `shipped`                  the tag (tag.yml) for a `/shipped` comment, on the release PR's base branch, then the announcement
 #   dispatch `reship`                   the cut of a re-ship (cut.yml), on the default branch
-#   dispatch `prerelease`               a prerelease's start and publish (prerelease.yml), on `main` or `main-<x.y>`
+#   dispatch `prerelease`               a prerelease's start (prerelease.yml), the build of its files by kind (a go-cli's,
+#                                       go-cli-prerelease-build.yml), then its publish, on `main` or `main-<x.y>`
 #   dispatch `announce`                 the announcement (announce.yml) of the tag `args.tag` names, on the default branch
 #
 # The ask after a record is not run here: the record starts it, once it writes SHIP, by dispatching `shipyard-release.yml` with
 # the action `ask` on the default branch, where the `slack` environment lets it run, and the gate the same way on `main`
 # (record.yml, `ask-workflow` and `gate-workflow`). So the ask posts once per release PR, after the record that says SHIP. A repo
 # that owns `record` runs no record job; its own record ends with the same dispatch, and the ask job runs from it. A repo Shipyard
-# has no candidate build for (a kind with none, a Go CLI built with cgo) runs no record, and the first job warns it to own one.
+# has no candidate build for (a kind with none) runs no record, and the first job warns it to own one. A Go CLI's ship and candidate
+# run in the build environment its `build` settings name (the image, runner, platform and sibling repos of a cgo build).
 #
 # The push. A repo that owns `ship` or `tag` runs neither here. A Go CLI's tag follows its ship job's pass (the ship job's result is
 # the tag's `ship-result`), and a Go library, whose tag is its publish, tags at the merge. The merge-back is a job of its own, after
@@ -29,11 +32,21 @@
 # `tag` still gets the merge-back, which waits up to 45 minutes for that tag to appear. The announcement and the `afterShip`
 # workflows follow the tag this run made, or the one the merge-back found; a repo's own tag workflow also ends with a dispatch of
 # the action `announce` (README, "Owning a flow"), and announce.yml posts each output once per tag, so the two never post twice.
-# A Go CLI built with cgo runs no ship (the first job warns it to own `ship`), so nothing here tags it. A `shipped` dispatch is
+# The formula. A Go CLI's Homebrew job follows the tag job's pass and never a tag that failed or was not made: it needs the tag and
+# runs only when this run made one. It writes the formula into the tap from the Release's files (homebrew.yml), with the tap, the
+# formula, the versioned copy and the archive's name from `homebrew` in the repo's `.github/shipyard.yml`, each defaulting from
+# the repo (the first job checks them, and refuses a value the formula cannot hold before anything ships), and the description,
+# homepage and license from the file or, when it names none, from the repo on GitHub. A repo that owns its ship or its tag runs
+# its own Homebrew job.
+#
+# A Go CLI built with cgo ships and tags like any other, in the build image its `build.image` names. A `shipped` dispatch is
 # the `/shipped` comment's second run, and may name the artifact of a run the repo's own ship uploaded (`args.assets` and
-# `args.assets-run-id`, which become the tag job's `assets` and `assets-run-id`); a tag it makes is announced by that follow-on
-# (#608), since the action runs its own flow only. A prerelease is made without files, so a Go CLI's is refused: this file has no
-# build to run between its start and its publish.
+# `args.assets-run-id`, which become the tag job's `assets` and `assets-run-id`); a tag it makes is announced by the announce job,
+# which reads the `shipped` job's tag as it reads the tag job's. A prerelease's files are built between its start and its publish: a
+# Go CLI's by go-cli-prerelease-build.yml, given the commit and the tag the start named, in the build image, on the runner and
+# platform, with the siblings its `build` settings name (the ship's own build steps, in a job with a read-only token, no `id-token`,
+# no key, no environment and no cache, since it runs a work branch's code on `main`), and the publish attaches them. A kind with no
+# files has no build job and a publish with none.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to .github/workflows/ in
 # turbot/shipyard-workflows, and the fixed file calls that copy at `v0`, the tag each Shipyard release moves to its own commit.
@@ -109,10 +122,21 @@ jobs:
       ci-workflows: ${{ steps.route.outputs.ci-workflows }}
       record-note: ${{ steps.route.outputs.record-note }}
       tag-signal: ${{ steps.route.outputs.tag-signal }}
-      ship-note: ${{ steps.route.outputs.ship-note }}
+      build-image: ${{ steps.route.outputs.build-image }}
+      runner: ${{ steps.route.outputs.runner }}
+      platform: ${{ steps.route.outputs.platform }}
+      siblings: ${{ steps.route.outputs.siblings }}
       tag-note: ${{ steps.route.outputs.tag-note }}
       page-targets: ${{ steps.route.outputs.page-targets }}
       after-ship: ${{ steps.route.outputs.after-ship }}
+      homebrew-tap: ${{ steps.route.outputs.homebrew-tap }}
+      homebrew-formula: ${{ steps.route.outputs.homebrew-formula }}
+      homebrew-binary: ${{ steps.route.outputs.homebrew-binary }}
+      homebrew-desc: ${{ steps.route.outputs.homebrew-desc }}
+      homebrew-homepage: ${{ steps.route.outputs.homebrew-homepage }}
+      homebrew-license: ${{ steps.route.outputs.homebrew-license }}
+      homebrew-versioned: ${{ steps.route.outputs.homebrew-versioned }}
+      homebrew-archive: ${{ steps.route.outputs.homebrew-archive }}
       product: ${{ steps.route.outputs.product }}
       floating-major: ${{ steps.route.outputs.floating-major }}
       assets: ${{ steps.route.outputs.assets }}
@@ -123,6 +147,7 @@ jobs:
       pre-branch: ${{ steps.route.outputs.pre-branch }}
       pre-version: ${{ steps.route.outputs.pre-version }}
       pre-kind: ${{ steps.route.outputs.pre-kind }}
+      pre-build: ${{ steps.route.outputs.pre-build }}
     steps:
       # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
       # workflow, which is the commit of shipyard to run.
@@ -182,12 +207,14 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           fail() { echo "::error title=Release router::$1"; exit 2; }
-          facts=$(gh api "repos/$GITHUB_REPOSITORY" --jq '[.default_branch, (.custom_properties.release_area // "")] | @tsv') \
+          # One read of the repo: the default branch and area, and the description, homepage and license that a Go CLI's Homebrew
+          # settings default to when its file names none (route reads the three from the same file; the other keys it ignores).
+          gh api "repos/$GITHUB_REPOSITORY" --jq '{default_branch, area: (.custom_properties.release_area // ""), description, homepage, license: .license.spdx_id}' > "$RUNNER_TEMP/repo-facts.json" \
             || fail "could not read the repo's default branch and release_area property, so no flow runs"
-          IFS=$'\t' read -r default area <<< "$facts"
+          IFS=$'\t' read -r default area < <(node -e 'const f = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(`${f.default_branch || ""}\t${f.area || ""}\n`);' "$RUNNER_TEMP/repo-facts.json")
           [ -n "$default" ] || fail "GitHub named no default branch, so no flow runs"
           [ -n "$area" ] || fail "the repo has no release_area property: set it to the area that releases it, so its approvers are known. No flow runs"
-          args=(--event "$EVENT" --repo "$GITHUB_REPOSITORY" --area "$area" --default-branch "$default" --dir caller --ref "$GITHUB_REF")
+          args=(--event "$EVENT" --repo "$GITHUB_REPOSITORY" --area "$area" --default-branch "$default" --dir caller --ref "$GITHUB_REF" --facts "$RUNNER_TEMP/repo-facts.json")
           [ -z "$ACTION" ] || args+=(--action "$ACTION")
           [ -z "$ARGS" ] || args+=(--args "$ARGS")
           [ -z "$BASE" ] || args+=(--base "$BASE")
@@ -200,7 +227,6 @@ jobs:
           console.log(d.flows.length ? `Runs: ${d.flows.join(', ')}.` : `Runs nothing: ${say(d.message)}`);
           for (const s of d.skipped) console.log(`Skipped ${s.flow}: ${say(s.why)}.`);
           if (d.inputs['record-note']) console.log(`::warning title=Release router::${say(d.inputs['record-note'])}`);
-          if (d.inputs['ship-note']) console.log(`::warning title=Release router::${say(d.inputs['ship-note'])}`);
           if (d.inputs['tag-note']) console.log(`::warning title=Release router::${say(d.inputs['tag-note'])}`);
           if (d.flows.includes('check') && d.inputs.candidate) {
             console.log("If this run builds the candidate, the release check is not run in it: the record names that run as its results, so it must end with success. The repo's own release-check caller checks such a release PR.");
@@ -282,6 +308,10 @@ jobs:
       binary: ${{ needs.route.outputs.binary }}
       make-target: ${{ needs.route.outputs.make-target }}
       test-target: ${{ needs.route.outputs.test-target }}
+      build-image: ${{ needs.route.outputs.build-image }}
+      runner: ${{ needs.route.outputs.runner }}
+      platform: ${{ needs.route.outputs.platform }}
+      siblings: ${{ needs.route.outputs.siblings }}
 
   candidate-go-library:
     name: candidate
@@ -415,14 +445,13 @@ jobs:
   # has no job for it (the route job's decision); a push that is no release passes through each job with nothing to do.
 
   # A Go CLI's build at the merge: goreleaser with the version from the release PR, publishing nothing; the tag job attaches the
-  # files. Runs the repo's make target and goreleaser file, with a read-only token and no key. A Go CLI built with cgo runs none
-  # (`ship-note`: it owns its ship).
+  # files. Runs the repo's make target and goreleaser file, with a read-only token and no key, in the build image, on the runner
+  # and platform, with the sibling repos its `build` settings name (a cgo build's cross-compiling environment).
   ship:
     name: ship
     needs: route
     if: >-
       contains(fromJSON(needs.route.outputs.flows), 'ship')
-      && needs.route.outputs.ship-note == ''
       && github.event_name == 'push'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
     permissions:
@@ -433,6 +462,10 @@ jobs:
     with:
       automation-logins: ${{ needs.route.outputs.automation-logins }}
       make-target: ${{ needs.route.outputs.make-target }}
+      build-image: ${{ needs.route.outputs.build-image }}
+      runner: ${{ needs.route.outputs.runner }}
+      platform: ${{ needs.route.outputs.platform }}
+      siblings: ${{ needs.route.outputs.siblings }}
 
   # Enters the `release` environment, which allows `main` and `main-<x.y>` only. A Go CLI tags only once its ship job passed; a Go
   # library, whose tag is the publish, tags at the merge. The merge-back is the job below, so a failed merge-back never fails this
@@ -493,6 +526,42 @@ jobs:
     secrets:
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
+  # A Go CLI's Homebrew formula (docs/release-cli.md), written into the tap from the Release's files, after the tag this run made: it
+  # needs the tag job to have passed and to have made a tag, so it never follows a tag that failed or was not made, and a run again
+  # finishes a formula that failed (it writes the same text, or finds it written). A repo that is no Go CLI, one that owns its ship
+  # or its tag have no `homebrew-tap` and no job. Enters the `release` environment.
+  homebrew:
+    name: homebrew
+    needs: [route, tag]
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'tag')
+      && needs.route.outputs.homebrew-tap != ''
+      && github.event_name == 'push'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && needs.tag.result == 'success'
+      && needs.tag.outputs.tag != ''
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+      tap: ${{ needs.route.outputs.homebrew-tap }}
+      formula: ${{ needs.route.outputs.homebrew-formula }}
+      binary: ${{ needs.route.outputs.homebrew-binary }}
+      desc: ${{ needs.route.outputs.homebrew-desc }}
+      homepage: ${{ needs.route.outputs.homebrew-homepage }}
+      license: ${{ needs.route.outputs.homebrew-license }}
+      versioned: ${{ needs.route.outputs.homebrew-versioned == 'true' }}
+      archive: ${{ needs.route.outputs.homebrew-archive }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
   # The changelog page on the product's site repo (docs/release-announce.md), from the release notes, after the tag this run made:
   # the page refuses by itself while the Release is not published, and a repo with no `announce.page` has no target and no job.
   # Enters the `release` environment.
@@ -521,26 +590,61 @@ jobs:
     secrets:
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
+  # `/shipped` on a merged release PR: the comment's run started this one on the PR's base branch, where the release environment
+  # lets the key through (tag.yml's `shipped` job form). `shipyard tag` reads the comment again and checks it. The repo's own ship
+  # may name the artifact of its run (`args.assets`, `args.assets-run-id`). Enters the `release` environment. The merge-back
+  # is tag.yml's own step here, as it is for a `/shipped` in a repo's own workflow.
+  shipped:
+    name: shipped
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'shipped')
+      && github.event_name == 'workflow_dispatch'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write        # tag.yml's `shipped` job starts a workflow; GitHub checks the grant of every job it holds
+      id-token: write
+    uses: ./.github/workflows/tag.yml
+    with:
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+      floating-major: ${{ needs.route.outputs.floating-major == 'true' }}
+      product: ${{ needs.route.outputs.product }}
+      assets: ${{ needs.route.outputs.assets }}
+      assets-run-id: ${{ needs.route.outputs.shipped-assets-run-id }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
   # The #releases line and the "Live in" comments. After the merge-back, which follows the tag, whatever its result: a merge-back
   # that needs a person never holds the announcement back. The tag is the one this run made, or, for a repo that owns its tag, the
   # one the merge-back found waiting for it (a push that is no release has none, and nothing is announced). An `announce` dispatch
-  # on the default branch, which a repo's own tag ends with, announces the tag it names. It posts with the org's Slack token, so it
-  # carries the actor check, though it enters no environment. announce.yml posts each output once per tag.
+  # on the default branch, which a repo's own tag ends with, announces the tag it names. A `shipped` dispatch that made a tag (the
+  # `shipped` job's own `tag` output; a `/shipped` that tags nothing leaves it empty) is announced the same way, on `main` or
+  # `main-<x.y>` where that job ran, whatever the job's result: tag.yml names the tag only once the tag, the Release and the Shipped
+  # comment are made, so a merge-back that needs a person (its own step there) never holds the announcement back, as on a push. It posts with the org's Slack token, so it carries the actor check, though it enters no
+  # environment. announce.yml posts each output once per tag, so a `/shipped` run again for a tag already made posts nothing more.
   announce:
     name: announce
-    needs: [route, tag, merge-back]
+    needs: [route, tag, merge-back, shipped]
     if: >-
       !cancelled()
       && needs.route.result == 'success'
-      && contains(fromJSON(needs.route.outputs.flows), 'announce')
       && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
       && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && ((contains(fromJSON(needs.route.outputs.flows), 'announce')
       && ((github.event_name == 'push'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
       && (needs.tag.outputs.tag != '' || needs.merge-back.outputs.tag != ''))
       || (github.event_name == 'workflow_dispatch'
       && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-      && needs.route.outputs.announce-tag != ''))
+      && needs.route.outputs.announce-tag != '')))
+      || (contains(fromJSON(needs.route.outputs.flows), 'shipped')
+      && github.event_name == 'workflow_dispatch'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && needs.shipped.outputs.tag != ''))
     permissions:
       contents: read
       pull-requests: write   # the release PR's note that the line was posted
@@ -548,7 +652,7 @@ jobs:
       id-token: write
     uses: ./.github/workflows/announce.yml
     with:
-      tag: ${{ needs.tag.outputs.tag || needs.merge-back.outputs.tag || needs.route.outputs.announce-tag }}
+      tag: ${{ needs.tag.outputs.tag || needs.merge-back.outputs.tag || needs.shipped.outputs.tag || needs.route.outputs.announce-tag }}
       automation-logins: ${{ needs.route.outputs.automation-logins }}
     secrets:
       slack-token: ${{ secrets.SHIPYARD_SLACK_BOT_TOKEN }}
@@ -596,34 +700,6 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # The dispatch actions of the other half of the table.
-
-  # `/shipped` on a merged release PR: the comment's run started this one on the PR's base branch, where the release environment
-  # lets the key through (tag.yml's `shipped` job form). `shipyard tag` reads the comment again and checks it. The repo's own ship
-  # may name the artifact of its run (`args.assets`, `args.assets-run-id`). Enters the `release` environment. The merge-back
-  # is tag.yml's own step here, as it is for a `/shipped` in a repo's own workflow.
-  shipped:
-    name: shipped
-    needs: route
-    if: >-
-      contains(fromJSON(needs.route.outputs.flows), 'shipped')
-      && github.event_name == 'workflow_dispatch'
-      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
-    permissions:
-      contents: read
-      pull-requests: read
-      actions: write        # tag.yml's `shipped` job starts a workflow; GitHub checks the grant of every job it holds
-      id-token: write
-    uses: ./.github/workflows/tag.yml
-    with:
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
-      floating-major: ${{ needs.route.outputs.floating-major == 'true' }}
-      product: ${{ needs.route.outputs.product }}
-      assets: ${{ needs.route.outputs.assets }}
-      assets-run-id: ${{ needs.route.outputs.shipped-assets-run-id }}
-    secrets:
-      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
   # A re-ship: the cut again of a version whose release PR merged and whose ship failed, on the default branch, from the commit and
   # version `args` name, with the fixes it lists. It needs no prep file.
@@ -676,12 +752,45 @@ jobs:
       # The workflow's publish job reads it; this call runs its start step only, and GitHub checks the secrets of every job.
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
-  prerelease-publish:
-    name: prerelease-publish
+  # The files of a Go CLI's prerelease: the commit built with the tag the start step named as its version. It runs the repo's make
+  # target and goreleaser file at a work branch's commit, which nobody may have approved, on `main`. So it holds `contents: read`
+  # alone: no `id-token` (the code could ask for an OIDC token in `main`'s name), no secret, no environment and no cache, and the
+  # files are data the publish job attaches, never runs. It runs only after a start that passed, which checked who started the run,
+  # the branch and the commit. A kind with no files has no build (`pre-build`).
+  prerelease-build:
+    name: prerelease-build
     needs: [route, prerelease-start]
     if: >-
       needs.route.result == 'success'
       && needs.prerelease-start.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'prerelease')
+      && needs.route.outputs.pre-build == 'go-cli'
+      && github.event_name == 'workflow_dispatch'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+    permissions:
+      contents: read
+    uses: ./.github/workflows/go-cli-prerelease-build.yml
+    with:
+      commit: ${{ needs.route.outputs.commit }}
+      tag: ${{ needs.prerelease-start.outputs.tag }}
+      make-target: ${{ needs.route.outputs.make-target }}
+      build-image: ${{ needs.route.outputs.build-image }}
+      runner: ${{ needs.route.outputs.runner }}
+      platform: ${{ needs.route.outputs.platform }}
+      siblings: ${{ needs.route.outputs.siblings }}
+
+  # After the start and, for a kind that has files, after their build: a build that failed or was skipped publishes nothing, so no
+  # empty prerelease is made. A kind with no build has its build job skipped, which `!cancelled()` lets this job run after.
+  prerelease-publish:
+    name: prerelease-publish
+    needs: [route, prerelease-start, prerelease-build]
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && needs.prerelease-start.result == 'success'
+      && (needs.route.outputs.pre-build == '' || needs.prerelease-build.result == 'success')
       && contains(fromJSON(needs.route.outputs.flows), 'prerelease')
       && github.event_name == 'workflow_dispatch'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
@@ -701,6 +810,7 @@ jobs:
       approvers: ${{ needs.route.outputs.approvers }}
       tag: ${{ needs.prerelease-start.outputs.tag }}
       product: ${{ needs.route.outputs.product }}
+      assets: ${{ needs.route.outputs.assets }}
     secrets:
       org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

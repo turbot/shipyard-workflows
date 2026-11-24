@@ -1,4 +1,4 @@
-# The required status on every PR into `main` and `main-*`: the ten rules of a release
+# The required status on every PR into `main` and `main-*`: the eleven rules of a release
 # candidate (docs/release-check.md). It sets the commit status `release-check` on the PR's head.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to

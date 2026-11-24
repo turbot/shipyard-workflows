@@ -226,6 +226,28 @@ jobs:
               || { echo "::error title=Cut::cannot read $PREP_FILE at $GITHUB_SHA"; exit 2; }
           fi
 
+      # A Go library's facts compare its exported API with `apidiff`, which has no release binary, so it is built here at
+      # one pinned version (`go install` at an exact version is checked against the Go checksum database), at least 14 days
+      # old when its PR opened, as for every third-party tool a release job installs. Only a go-library
+      # needs it, and a step cannot be skipped by an `if:` here, so the script decides. The runner's own `go` fetches the
+      # toolchain the tool's `go.mod` names (GOTOOLCHAIN=auto), so no setup-go step runs for every repo's cut.
+      - name: Install apidiff for a Go library
+        shell: bash
+        env:
+          APIDIFF_VERSION: v0.0.0-20261109185158-a52e3aef5920
+          GOTOOLCHAIN: auto
+        run: |
+          if [[ -n "$RESHIP" ]]; then echo 'A re-ship makes no facts, so it needs no API tool.'; exit 0; fi
+          kind=$(node shipyard/bin/shipyard kind --dir caller --rev "$COMMIT")
+          if [[ "$kind" != go-library ]]; then echo 'This repo is not a Go library, so no API tool is needed.'; exit 0; fi
+          if ! command -v go > /dev/null; then
+            echo '::error title=Cut::a Go library'"'"'s facts need apidiff, which is built with go, and there is no go on this runner'
+            exit 2
+          fi
+          mkdir -p "$RUNNER_TEMP/api-tool"
+          GOBIN="$RUNNER_TEMP/api-tool" go install "golang.org/x/exp/cmd/apidiff@$APIDIFF_VERSION"
+          echo "$RUNNER_TEMP/api-tool" >> "$GITHUB_PATH"
+
       - name: Make the facts
         shell: bash
         env:

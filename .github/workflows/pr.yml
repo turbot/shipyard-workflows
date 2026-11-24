@@ -12,7 +12,17 @@
 #                        PR body and posts the commit status `shipyard/changelog-line` on the PR's
 #                        head (github.event.pull_request.head.sha). A PR into any other branch: nothing.
 #   workflow_dispatch    the sweep: check every open PR into `develop` and post each one's status.
-#   issue_comment        nothing yet. The comment commands move here with layer 2.
+#   issue_comment        the `comment` job, a job of its own: `/shipped` or `/level` on a PR, in a repo on
+#                        .github/shipyard.yml. It runs `shipyard comment`, which checks the commenter has write access (and,
+#                        for `/shipped`, that the PR is a merged release PR) and starts `shipyard-release.yml` on the PR's base
+#                        branch: `/shipped` with the action `shipped`, `/level` with the action `check`, which runs the release
+#                        check, the only code that reads `/level`, and ignores one that is not from the area's approver team. A
+#                        repo not on shipyard.yml is skipped: its own workflows answer both comments. Every other comment does
+#                        nothing. A comment that only starts like one (`/shipped now`) starts a runner, and the command skips it.
+#
+# The two jobs are apart so the token that starts a workflow (`actions: write`) is never the one a fork's `pull_request_target`
+# run holds: `pr` asks for no more than it did, and `comment` runs on `issue_comment` only. Only `comment` holds `actions: write`;
+# no job holds `issues: write`, which the caller grants and no step uses. Neither reads a secret or checks out the PR's code.
 #
 # Safe on `pull_request_target`: nothing here checks out or runs the PR's code, and no secret is
 # used. It reads the base branch's .github/shipyard.yml, or .github/release.json while the repo has not moved
@@ -38,8 +48,8 @@ jobs:
       (github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == 'develop')
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Only what the steps below use. The caller grants more (issues: write and actions: write, for layer 2's comment
-    # commands); a called job may ask for less, so the token holds nothing a step here does not need. A test
+    # Only what the steps below use. The caller grants more (issues: write and actions: write, for the comment commands, which
+    # the `comment` job below holds); a called job may ask for less, so the token holds nothing a step here does not need. A test
     # (test/pr-permissions.test.js) fails when this list asks for a permission no step uses.
     permissions:
       contents: read        # "Check out the repo's release config", the sweep's read of each base branch's config, and the read of a changed shipyard.yml at the PR head
@@ -113,3 +123,65 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node shipyard/bin/shipyard changelog-line --sweep --work-branch develop
+
+  # `/shipped` and `/level`, on a new comment on a PR that starts with one of them. This is narrower than the caller's own filter
+  # (a comment on a PR that starts with `/`), never wider: a test evaluates both. `startsWith` is how the caller filters too.
+  comment:
+    name: comment
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      (startsWith(github.event.comment.body, '/shipped') || startsWith(github.event.comment.body, '/level'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Only what the steps below use (test/pr-permissions.test.js holds both jobs to it). No secret: the approver check of a
+    # `/level` is the release check's, which holds the org token.
+    permissions:
+      contents: read        # "Answer /shipped and /level" reads the repo's config file and the release PR's files through the API, as data
+      pull-requests: read   # "Answer /shipped and /level" reads the PR and its merge commit
+      actions: write        # "Answer /shipped and /level" starts shipyard-release.yml on the PR's base branch (workflow_dispatch)
+      id-token: write       # "Find this workflow's commit" asks for an OIDC token to learn job_workflow_sha
+    steps:
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/pr.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows pr.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Shipyard PR::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The comment reaches the command through the event file, never in a shell line.
+      - name: Answer /shipped and /level
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node shipyard/bin/shipyard comment

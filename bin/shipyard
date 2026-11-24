@@ -16,6 +16,7 @@ const STEPS = {
   'release-gate': () => require('../lib/release-gate-command'),
   ask: () => require('../lib/ask-command'),
   tag: () => require('../lib/tag-command'),
+  comment: () => require('../lib/comment-command'),
   deployment: () => require('../lib/deployment-command'),
   'docs-preview': () => require('../lib/docs-preview-command'),
   'site-docs-preview': () => require('../lib/site-docs-preview-command'),
@@ -35,6 +36,7 @@ const STEPS = {
   'cli-results': () => require('../lib/cli-results-command'),
   'config-check': () => require('../lib/config-command'),
   route: () => require('../lib/route-command'),
+  kind: () => require('../lib/kind-command'),
   schedule: () => require('../lib/schedule-command'),
 };
 

@@ -1,0 +1,261 @@
+# The build of a Go CLI's prerelease (docs/release-prerelease.md): between the start and the publish steps of prerelease.yml, which
+# workflows/router.yml runs for a `prerelease` dispatch, it builds the named commit with goreleaser, the version set from the tag
+# the start step named and publishing skipped, and uploads every file `checksums.txt` lists (the archives, and the Linux packages
+# when the repo makes them) and `checksums.txt` as the artifact the publish step attaches to the prerelease. Nothing is published
+# here.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit.
+#
+# It builds what go-cli-ship.yml builds at a merge (the steps from "Set up Go" on are the same text bar their `if:`, their comments and the title of an error, which a test keeps so), but
+# not in that workflow: a prerelease builds a work branch's commit, which nobody may have approved, on `main`. So this job holds
+# `contents: read` and nothing else: no `id-token` (a step of the repo's code could otherwise ask for an OIDC token in `main`'s
+# name), no secret, no environment, no cache and no shipyard checkout, since nothing of shipyard's runs in it. The release
+# key is read only by the publish job, in the `release` environment. The start step has already checked who started the run, the
+# branch and the commit, and named the tag; this job takes both as inputs and checks their shape. Nothing a caller passes is put
+# into a shell line: each input reaches a step as an environment variable and is checked there.
+
+name: Go CLI prerelease build
+
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: The full 40-character commit to build, the same the prerelease's start and publish steps check.
+        type: string
+        required: true
+      tag:
+        description: The prerelease's tag (v1.5.0-rc.1), as the start step of prerelease.yml named it (needs.<start job>.outputs.tag). Its version is the build's.
+        type: string
+        required: true
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        default: v
+      goreleaser-config:
+        description: The goreleaser file, relative to the repo.
+        type: string
+        default: .goreleaser.yml
+      goreleaser-version:
+        description: The goreleaser version to install (the action's `version`).
+        type: string
+        default: ~> v2
+      make-target:
+        description: A make target to run before goreleaser (a generate or UI build step). Left empty, none is run.
+        type: string
+        default: ''
+      go-version-file:
+        description: The file that names the Go version, relative to the repo.
+        type: string
+        default: go.mod
+      runner:
+        description: 'The runner the job runs on (runs-on). A build that must run on an arm machine to link its arm64 CGO binary names one here, such as ubuntu-24.04-arm.'
+        type: string
+        default: ubuntu-latest
+      platform:
+        description: 'The container platform of the build image (docker run --platform), such as linux/arm64. Left empty, the image''s own.'
+        type: string
+        default: ''
+      build-image:
+        description: 'A container image that holds goreleaser and the compilers the build needs (a cross-compiling goreleaser image for a CGO build). The build runs in it, with the repo and each sibling mounted under /go/src. Left empty, goreleaser is installed on the runner.'
+        type: string
+        default: ''
+      siblings:
+        description: 'Public repos the build needs beside this one (a go.mod `replace ../name`), comma-separated, each <owner>/<name> or <owner>/<name>@<branch or tag>. Cloned at that ref, with no credential, next to the repo. Left empty, none.'
+        type: string
+        default: ''
+      artifact:
+        description: The name of the artifact the files are uploaded as. The publish step's `assets` input names the same.
+        type: string
+        default: release-assets
+    outputs:
+      tag:
+        description: The prerelease's tag, as given.
+        value: ${{ jobs.build.outputs.tag }}
+
+permissions: {}
+
+jobs:
+  build:
+    name: build
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read        # the commit
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          COMMIT: ${{ inputs.commit }}
+          PRERELEASE_TAG: ${{ inputs.tag }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          CONFIG: ${{ inputs.goreleaser-config }}
+          GORELEASER_VERSION: ${{ inputs.goreleaser-version }}
+          MAKE_TARGET: ${{ inputs.make-target }}
+          GO_VERSION_FILE: ${{ inputs.go-version-file }}
+          ARTIFACT: ${{ inputs.artifact }}
+          BUILD_IMAGE: ${{ inputs.build-image }}
+          SIBLINGS: ${{ inputs.siblings }}
+          RUNNER: ${{ inputs.runner }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          fail() { echo "::error title=Go CLI prerelease build::$1"; exit 2; }
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail 'commit is a full 40-character commit id'
+          [[ "$TAG_PREFIX" =~ ^[A-Za-z0-9._-]*$ ]] || fail 'tag-prefix may hold only letters, digits, dot, underscore and hyphen'
+          [[ "$PRERELEASE_TAG" == "$TAG_PREFIX"* && "${PRERELEASE_TAG#"$TAG_PREFIX"}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(alpha|beta|rc)\.[1-9][0-9]*$ ]] \
+            || fail 'tag is a prerelease tag: the tag prefix, X.Y.Z, then -alpha, -beta or -rc and a number, such as v1.5.0-rc.1'
+          path_ok() { [[ "$1" =~ ^[A-Za-z0-9._/-]+$ && "$1" != -* && "$1" != /* && "$1" != *..* ]]; }
+          path_ok "$CONFIG" || fail 'goreleaser-config must be a path inside the repo'
+          path_ok "$GO_VERSION_FILE" || fail 'go-version-file must be a path inside the repo'
+          [[ "$GORELEASER_VERSION" =~ ^(~>[[:space:]]*)?(latest|v?[0-9]+(\.[0-9]+){0,2})$ ]] || fail 'goreleaser-version is latest, a version, or ~> and a version'
+          [[ -z "$MAKE_TARGET" || "$MAKE_TARGET" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || fail 'make-target is the name of one target'
+          [[ "$ARTIFACT" =~ ^[A-Za-z0-9._-]{1,80}$ ]] || fail 'artifact is a name of letters, digits, dot, underscore and hyphen'
+          [[ "$RUNNER" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail 'runner is the name of a runner, such as ubuntu-latest'
+          [[ -z "$PLATFORM" || "$PLATFORM" =~ ^linux/(amd64|arm64)$ ]] || fail 'platform is linux/amd64 or linux/arm64'
+          [[ -z "$BUILD_IMAGE" || "$BUILD_IMAGE" =~ ^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$ ]] || fail 'build-image is a container image name, such as ghcr.io/example/builder:v1'
+          IFS=',' read -ra listed <<< "$SIBLINGS"
+          for item in "${listed[@]}"; do
+            item="${item//[[:space:]]/}"
+            [[ -z "$item" || "$item" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+(@[A-Za-z0-9._/-]+)?$ ]] || fail 'siblings are <owner>/<name> or <owner>/<name>@<ref>, comma-separated'
+          done
+
+      # The build's version is the tag's, with the prefix off: the tag the start step named, which the check above held to a
+      # prerelease tag.
+      - name: Take the version from the tag
+        id: version
+        shell: bash
+        env:
+          PRERELEASE_TAG: ${{ inputs.tag }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+        run: |
+          printf 'tag=%s\nversion=%s\n' "$PRERELEASE_TAG" "${PRERELEASE_TAG#"$TAG_PREFIX"}" >> "$GITHUB_OUTPUT"
+
+      # The prerelease's commit, with no credentials left in the checkout: the repo's own code runs from here on.
+      - name: Check out the repo at the commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: caller
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: caller/${{ inputs.go-version-file }}
+          cache: false
+
+      - name: Install goreleaser
+        if: ${{ inputs.build-image == '' }}
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: ${{ inputs.goreleaser-version }}
+          install-only: true
+
+      # Public repos the build needs beside this one, cloned with no credential: none is in this job's environment for them.
+      - name: Clone the sibling repos
+        if: ${{ inputs.siblings != '' }}
+        shell: bash
+        env:
+          SIBLINGS: ${{ inputs.siblings }}
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          IFS=',' read -ra listed <<< "$SIBLINGS"
+          for item in "${listed[@]}"; do
+            item="${item//[[:space:]]/}"
+            [ -n "$item" ] || continue
+            repo="${item%@*}"
+            ref=""
+            if [[ "$item" == *@* ]]; then ref="${item#*@}"; fi
+            git clone --depth 1 ${ref:+--branch "$ref"} "https://github.com/${repo}.git" "${repo#*/}" \
+              || { echo "::error title=Go CLI prerelease build::the sibling $item could not be cloned with no credential: it must be a public repo, and its branch or tag must exist (build.siblings in .github/shipyard.yml, or the siblings input)"; exit 1; }
+          done
+
+      - name: Run the repo's make target
+        if: ${{ inputs.make-target != '' }}
+        shell: bash
+        working-directory: caller
+        env:
+          MAKE_TARGET: ${{ inputs.make-target }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: make "$MAKE_TARGET"
+
+      # The version is set from the tag the start step named, and nothing is published: no release, no formula, no announcement. The
+      # tag does not exist yet, so goreleaser is told the tag it would build, and skips the check that the commit carries it.
+      - name: Build the release
+        shell: bash
+        working-directory: caller
+        env:
+          GORELEASER_CURRENT_TAG: ${{ steps.version.outputs.tag }}
+          CONFIG: ${{ inputs.goreleaser-config }}
+          BUILD_IMAGE: ${{ inputs.build-image }}
+          SIBLINGS: ${{ inputs.siblings }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          # In the build image, the repo and each sibling are mounted under /go/src, where its go.mod `replace` paths resolve.
+          goreleaser_run() {
+            if [ -z "$BUILD_IMAGE" ]; then goreleaser "$@"; return; fi
+            name="${GITHUB_REPOSITORY#*/}"
+            mounts=(-v "$PWD:/go/src/$name")
+            IFS=',' read -ra listed <<< "$SIBLINGS"
+            for item in "${listed[@]}"; do
+              item="${item//[[:space:]]/}"
+              [ -n "$item" ] || continue
+              repo="${item%%@*}"
+              mounts+=(-v "$(cd .. && pwd)/${repo#*/}:/go/src/${repo#*/}")
+            done
+            docker run --rm ${PLATFORM:+--platform="$PLATFORM"} -e CGO_ENABLED=1 -e GORELEASER_CURRENT_TAG "${mounts[@]}" -w "/go/src/$name" "$BUILD_IMAGE" "$@"
+          }
+          goreleaser_run release --clean --skip=publish,announce,validate --config "$CONFIG"
+
+      # The Release carries every file `checksums.txt` lists (archives, and the Linux packages nfpm makes), flat, and `checksums.txt`.
+      # Each listed file must be in dist/ and match its checksum; a file in dist/ that is not listed is left out.
+      - name: Collect the release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/release-files"
+          dist=caller/dist
+          mkdir -p "$out"
+          [ -f "$dist/checksums.txt" ] || { echo "::error title=Go CLI prerelease build::goreleaser made no checksums.txt in dist/"; exit 1; }
+          listed=()
+          n=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            n=$((n + 1))
+            [ -n "${line//[[:space:]]/}" ] || continue
+            # sha256sum's own format: a 64-digit hash, a space, a space or `*`, then the file's name. The name is never printed
+            # until it is known to be a plain one, so a line of the file cannot write a workflow command.
+            if [[ ! "$line" =~ ^[0-9a-fA-F]{64}\ [\ *](.+)$ ]]; then
+              echo "::error title=Go CLI prerelease build::line $n of dist/checksums.txt is not a sha256sum line"; exit 1
+            fi
+            name="${BASH_REMATCH[1]}"
+            if [[ ! "$name" =~ ^[A-Za-z0-9._+@=~-]{1,255}$ ]]; then
+              echo "::error title=Go CLI prerelease build::line $n of dist/checksums.txt names a file with a name a Release cannot carry (letters, digits and . _ + @ = ~ - only)"; exit 1
+            fi
+            listed+=("$name")
+          done < "$dist/checksums.txt"
+          [ "${#listed[@]}" -gt 0 ] || { echo "::error title=Go CLI prerelease build::dist/checksums.txt lists no file"; exit 1; }
+          missing=0
+          for name in "${listed[@]}"; do
+            if [ ! -f "$dist/$name" ]; then
+              echo "::error title=Go CLI prerelease build::dist/checksums.txt lists $name, and goreleaser made no such file in dist/"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          for name in "${listed[@]}"; do cp "$dist/$name" "$out/"; done
+          cp "$dist/checksums.txt" "$out/"
+          (cd "$out" && sha256sum --check --strict checksums.txt)
+
+      - name: Upload the release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact }}
+          path: ${{ runner.temp }}/release-files/*
+          if-no-files-found: error
+          retention-days: 14

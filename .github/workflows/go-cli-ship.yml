@@ -201,6 +201,7 @@ jobs:
         shell: bash
         env:
           SIBLINGS: ${{ inputs.siblings }}
+          GIT_TERMINAL_PROMPT: '0'
         run: |
           IFS=',' read -ra listed <<< "$SIBLINGS"
           for item in "${listed[@]}"; do
@@ -209,7 +210,8 @@ jobs:
             repo="${item%@*}"
             ref=""
             if [[ "$item" == *@* ]]; then ref="${item#*@}"; fi
-            git clone --depth 1 ${ref:+--branch "$ref"} "https://github.com/${repo}.git" "${repo#*/}"
+            git clone --depth 1 ${ref:+--branch "$ref"} "https://github.com/${repo}.git" "${repo#*/}" \
+              || { echo "::error title=Go CLI ship::the sibling $item could not be cloned with no credential: it must be a public repo, and its branch or tag must exist (build.siblings in .github/shipyard.yml, or the siblings input)"; exit 1; }
           done
 
       - name: Run the repo's make target

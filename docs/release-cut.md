@@ -72,6 +72,15 @@ A repo that has one names it in `.github/shipyard.yml` (or `.github/release.json
 
 It runs in the checkout (which must be at `--to`; for a patch, a scratch worktree at `--to` with the fixes picked on, removed after, with `SHIPYARD_TO` that commit) with `SHIPYARD_FROM` and `SHIPYARD_TO` set, no token and no other secret, and a two-minute limit, and prints a JSON list: `[{ "id": "removed-flag", "why": "The --old flag is gone." }]`. An `id` is lowercase letters, digits, `.`, `_` and `-`. A detector that fails, times out or prints anything else is exit 2: a failed detector is never read as "no signs". A repo with no detector has no signs. The command is code the repo already holds at the commit being released, run by the job that makes the facts; no secret sits beside it.
 
+### A Go library's API, and the tool that reads it
+
+A repo of kind `go-library` also gets an `api` block in its facts: the exported names its API removes, changes and adds between the range's start and the commit that ships, and its module path before and after ([prep-file.md](prep-file.md#what-a-go-librarys-api-sets)). `facts` makes it by running `apidiff` (`golang.org/x/exp/cmd/apidiff`), which has no release binary, so the tool is built at one pinned version (`API_TOOL_VERSION` in `lib/go-api.js`), at least 14 days old when its PR opened. A missing `apidiff` stops the facts, exit 2, with an error that names it.
+
+- **The cut** installs it in its own step, "Install apidiff for a Go library", between the checkout and "Make the facts". The step asks `shipyard kind --dir caller --rev "$COMMIT"` for the repo's kind and, for anything but `go-library` (and for a re-ship, which makes no facts), says no tool is needed and does nothing. For a go-library it runs `go install` at `APIDIFF_VERSION` (the same version, held equal by `test/cut-api-tool.test.js`) into `$RUNNER_TEMP/api-tool` and puts that folder on the `PATH`. A runner with no `go` stops the cut with an error naming `go`. The pinned tool needs a recent Go; the runner's `go` fetches the toolchain the tool names (`GOTOOLCHAIN=auto`).
+- **The prep run** installs it by hand before it makes the facts: the prep job's text, for a go-library, gives the exact `go install` command and says its folder (`$(go env GOPATH)/bin`) must be on the `PATH`. A job for any other kind says nothing of it.
+
+`shipyard kind [--dir <checkout>] [--rev <commit>]` (defaults `.` and `HEAD`) prints the `kind` of `.github/shipyard.yml` at that commit and a newline. A repo on `.github/release.json`, or with no config, prints nothing (exit 0). It exits 2, printing `shipyard kind: <why>`, when the file cannot be read there (it is not YAML) or the commit names nothing. It reads with the loader the facts use, so the step and the facts decide the same way.
+
 ## `changelog`
 
 `shipyard changelog --facts facts.json --prep prep.json --version X.Y.Z [--date YYYY-MM-DD] [--file CHANGELOG.md]`
@@ -165,7 +174,7 @@ A version whose release PR merged and whose ship run on the merge failed was nev
 
 ## The workflows
 
-`workflows/cut.yml` runs `facts`, `lint-prep` and `cut` in order, and uploads the four files as the artifact `release-pr`; a step that fails stops the job, so a prep file made for another range, or one that fails the lint, never reaches the cut, and the cut passes `--within` the commit the run started from (a light cut: the working branch's tip the job fetched). `workflows/record.yml` runs `record`, which commits nothing, and then `record --update`. Both are published to `turbot/shipyard-workflows` and called by pinned commit: the README says how.
+`workflows/cut.yml` runs `facts` (after the Go library's tool install above, for a go-library), `lint-prep` and `cut` in order, and uploads the four files as the artifact `release-pr`; a step that fails stops the job, so a prep file made for another range, or one that fails the lint, never reaches the cut, and the cut passes `--within` the commit the run started from (a light cut: the working branch's tip the job fetched). `workflows/record.yml` runs `record`, which commits nothing, and then `record --update`. Both are published to `turbot/shipyard-workflows` and called by pinned commit: the README says how.
 
 ## The version `publish` tags
 

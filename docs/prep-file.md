@@ -268,6 +268,20 @@ The flag's id is `caller-needs-<workflow>-<kind>-<name>`, with the job after the
 
 **How to add a feature without a major.** Put a job that needs more in a new published workflow that callers add when they want it, instead of a new job in one they already call. That keeps `@v0` working for every repo that does not opt in.
 
+## What a Go library's API sets
+
+A Go library is tagged, not built, so its tag is its publish and the Go proxy serves it. Its level is judged from what other code can import, not only from what the PRs say. `shipyard facts` runs `apidiff` over the library's exported API at the range's start and at the commit that ships, and writes the result as `api` (below). It reads the library as a Linux amd64 build with cgo, the cut's runner, on whatever machine it runs, so the prep run and the cut find the same API. A library with its own cgo files needs a C compiler for Linux amd64 to be read that way, so off Linux amd64 (a Mac, or an arm64 Linux machine) its facts stop with an error that says so: make them on a Linux amd64 machine. The names in it are as a person finds them in the code: the package path inside the module, then the name.
+
+The API sets a floor for `level.bump`, never a ceiling:
+
+- `removed` or `changed` is not empty: at least `major`. Below 1.0.0 (the previous tag's major is 0) it is a `minor`, as the 0.x rule says; a chosen `major` from 0.x is still allowed and makes 1.0.0.
+- Only `added` is not empty: at least `minor`.
+- All three are empty, or no Go file changed: `patch` is enough.
+
+A level above the floor passes: a repo may call a release a minor for a reason outside its API. The module path must fit the level, by Go's rule: a `major` that makes v2 or later needs the new module path (`/v2`) in `go.mod` already, put there by its own PR first, and a module path that changed between the two commits must be a `major`.
+
+`lint-prep` refuses a lower level with `api-level-low`, naming the removed or changed names (or the added ones for a minor), ten at most and then "and N more", and a path that does not fit with `api-module-path`, naming the paths. The release check applies the same rules to the level the approver ends up with ([release-check.md](release-check.md)). Facts with no `api` are linted as before.
+
 ## What the lint reads from the facts
 
 `facts.json` comes from `shipyard facts` ([docs/release-cut.md](release-cut.md)), which checks that the checkout has GitHub's newest release tag before it starts the range, so the range never starts one release too early. It holds more than this; the lint reads only these fields, and stops with exit 2 when one is missing or the wrong type.
@@ -293,6 +307,13 @@ The flag's id is `caller-needs-<workflow>-<kind>-<name>`, with the job after the
 | `callerNeeds[].name` | The permission, the input or the secret. |
 | `callerNeeds[].job` | For a permission, the job that asks for it. |
 | `callerNeeds[].from`, `callerNeeds[].to` | For a permission, the most the workflow asked for before (`none`, `read` or `write`) and what it asks for now (`read` or `write`). |
+| `api` | Optional. Only a Go library's facts have it (`kind: go-library`, and not a first release): its exported API at the range's start against the commit that ships, made by `apidiff` ([What a Go library's API sets](#what-a-go-librarys-api-sets)). |
+| `api.tool` | The tool that made it, `apidiff`. |
+| `api.goFilesChanged` | `false` when no `.go` file other than a test changed in the range: the tool was not run and the three lists are empty, which says nothing in the API could have changed. |
+| `api.modulePath.from`, `api.modulePath.to` | The `module` line of `go.mod` at the range's start and at the commit that ships. |
+| `api.removed` | Exported names the range removes (`Parse`, `client.Client.Close`), sorted, each once. |
+| `api.changed` | Exported names whose signature or type changed incompatibly, or whose method set shrank. |
+| `api.added` | Exported names the range adds. |
 | `internalTerms` | The repo's internal terms (`notes.internalTerms` in its config), a list that may be empty. |
 | `publicRepos` | Optional. Other repos the release notes may link to, `<owner>/<name>`. |
 | `privateHosts` | Optional. More hosts whose pages count as private, such as `wiki.example.com`. |
@@ -306,6 +327,7 @@ The flag's id is `caller-needs-<workflow>-<kind>-<name>`, with the job after the
 - a PR that ships something (`shipsNothing` is not `true`) has no single valid Changelog line in the facts, in any group, `Internal` too (`pr-no-changelog-line`). The cut refuses it the same way, as it never writes a line. The fix is on the PR (give it one line) and the facts are made again: answering its `no-changelog-line-<n>` flag does not clear it;
 - a group holds a PR that is not in the range (`group-not-in-range`);
 - the facts' `callerNeeds` is not empty, `level.bump` is `minor` or `patch` and a raise's flag has no answer (`caller-needs-raised`): the problem names the workflow, the job and what rose. A `major` passes with no answer, below 1.0 too (see [What callers must give](#what-callers-must-give));
+- the facts hold an `api` block and `level.bump` is below what it sets (`api-level-low`), or a `major` has no new module path in `go.mod`, or the module path changed at a level other than `major` (`api-module-path`): the problem names the removed, changed or added names, or the paths. The floor is only a floor (see [What a Go library's API sets](#what-a-go-librarys-api-sets));
 - a flag in the facts has no answer (`flag-unanswered`), an answer names a flag the facts do not raise (`flag-not-in-facts`), or a flag is answered twice (`flag-answered-twice`);
 - the file is format 1 (`format-1`) or format 2 (`format-2`), refused alone with a message that says what format 3 holds and, for format 2, what moved (`notes.sections` to `notes.items`, the groups to the six labels plus `Internal`, the title's `v`, 300 characters, `notes.reference`);
 - a `covers` entry, of a release-notes item or a report change, is not a PR in the range (`covers-not-in-range`);

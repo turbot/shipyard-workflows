@@ -118,6 +118,18 @@
         }
       }
     },
+    "go-cli-prerelease-build.yml": {
+      "inputs": [
+        "commit",
+        "tag"
+      ],
+      "secrets": [],
+      "jobs": {
+        "build": {
+          "contents": "read"
+        }
+      }
+    },
     "go-cli-results.yml": {
       "inputs": [
         "binary",
@@ -205,6 +217,12 @@
       "inputs": [],
       "secrets": [],
       "jobs": {
+        "comment": {
+          "actions": "write",
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
         "pr": {
           "contents": "read",
           "id-token": "write",
@@ -379,6 +397,11 @@
           "pull-requests": "read",
           "statuses": "read"
         },
+        "homebrew": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
         "merge-back": {
           "contents": "read",
           "id-token": "write",
@@ -390,6 +413,9 @@
           "pull-requests": "read"
         },
         "prep": {},
+        "prerelease-build": {
+          "contents": "read"
+        },
         "prerelease-publish": {
           "contents": "read",
           "id-token": "write",
