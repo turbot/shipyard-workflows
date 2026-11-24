@@ -1,0 +1,706 @@
+# The release router: the one workflow the fixed `.github/workflows/shipyard-release.yml` of every repo calls. Its first job asks
+# `shipyard route` which release flows the event runs for the repo (README, "The router's decision"), from the event and the
+# repo's `.github/shipyard.yml`, and never one the repo owns; then one job for each flow calls the published workflow that runs
+# it, with what the config resolves:
+#
+#   dispatch `prep`                     prep (prep.yml), then cut (cut.yml), on the default branch
+#   PR into a release branch            the candidate by kind, then the record; the release check (release-check.yml) only
+#                                       when the run builds no candidate (the check job says why)
+#   review of such a PR, dispatch `record`   the record (record.yml); a review reads the run the record already names
+#   dispatch `check`                    the release check
+#   dispatch `gate`                     the release gate (release-gate.yml), on `main`
+#   dispatch `ask`                      the Slack ask (ask.yml), on the default branch
+#   push to a release branch            ship by kind (a go-cli's, go-cli-ship.yml), then tag (tag.yml), then the merge-back
+#                                       (merge-back.yml), the announcement (announce.yml) and the repo's `afterShip` workflows
+#   dispatch `shipped`                  the tag (tag.yml) for a `/shipped` comment, on the release PR's base branch
+#   dispatch `reship`                   the cut of a re-ship (cut.yml), on the default branch
+#   dispatch `prerelease`               a prerelease's start and publish (prerelease.yml), on `main` or `main-<x.y>`
+#   dispatch `announce`                 the announcement (announce.yml) of the tag `args.tag` names, on the default branch
+#
+# The ask after a record is not run here: the record starts it, once it writes SHIP, by dispatching `shipyard-release.yml` with
+# the action `ask` on the default branch, where the `slack` environment lets it run, and the gate the same way on `main`
+# (record.yml, `ask-workflow` and `gate-workflow`). So the ask posts once per release PR, after the record that says SHIP. A repo
+# that owns `record` runs no record job; its own record ends with the same dispatch, and the ask job runs from it. A repo Shipyard
+# has no candidate build for (a kind with none, a Go CLI built with cgo) runs no record, and the first job warns it to own one.
+#
+# The push. A repo that owns `ship` or `tag` runs neither here. A Go CLI's tag follows its ship job's pass (the ship job's result is
+# the tag's `ship-result`), and a Go library, whose tag is its publish, tags at the merge. The merge-back is a job of its own, after
+# the tag (the tag job is called with `merge-back: false`), so a merge-back that needs a person never fails the tag. A repo that owns
+# `tag` still gets the merge-back, which waits up to 45 minutes for that tag to appear. The announcement and the `afterShip`
+# workflows follow the tag this run made, or the one the merge-back found; a repo's own tag workflow also ends with a dispatch of
+# the action `announce` (README, "Owning a flow"), and announce.yml posts each output once per tag, so the two never post twice.
+# A Go CLI built with cgo runs no ship (the first job warns it to own `ship`), so nothing here tags it. A `shipped` dispatch is
+# the `/shipped` comment's second run, and may name the artifact of a run the repo's own ship uploaded (`args.assets` and
+# `args.assets-run-id`, which become the tag job's `assets` and `assets-run-id`); a tag it makes is announced by that follow-on
+# (#608), since the action runs its own flow only. A prerelease is made without files, so a Go CLI's is refused: this file has no
+# build to run between its start and its publish.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to .github/workflows/ in
+# turbot/shipyard-workflows, and the fixed file calls that copy at `v0`, the tag each Shipyard release moves to its own commit.
+# Each job calls the published workflow of its flow from the same commit as this file (`./.github/workflows/<file>`).
+#
+# The ceiling. The fixed file grants the job that calls this workflow these permissions, and no job here, nor any workflow one
+# calls, asks for more (test/router-workflow.test.js):
+#
+#   actions: write
+#   attestations: write
+#   checks: read
+#   contents: write
+#   deployments: read
+#   id-token: write
+#   issues: write
+#   packages: write
+#   pull-requests: write
+#   statuses: write
+#
+# Each job asks only for what the workflow it calls needs; the workflow-level grant is none, so a job that named none would get
+# none. The secrets come by name, never `secrets: inherit`, and a secret a repo lacks arrives empty; each job passes on only the
+# one its workflow reads. Each job that enters an environment (the ask, `slack`; the gate, the tag, the merge-back and a
+# prerelease, `release`) carries an allow-list `if:`: a `push` or a `workflow_dispatch` on the branch the environment allows,
+# started (and, if run again, run again) by the record's own token (`github-actions[bot]`), the fleet (`turbot-agent-fleet[bot]`)
+# or a person, never another bot. Only an account with write access can dispatch a workflow or run one again, so a person here
+# has write, and a push to the branch is a merge or a push of an account with write access. No job enters an environment on a
+# review or a PR. The announcement posts to Slack with the org's token and carries the same actors and branch check.
+#
+# Nothing of the repo's is run in the first job: its workflow files and `.github/shipyard.yml` are read with git, as data. The
+# event's values reach the command as environment variables, never in a shell line.
+
+name: Release router
+
+on:
+  workflow_call:
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: The area's release App key, from the caller's `release` environment (docs/release-apps.md). The release gate, the tag (a push's and a `shipped` dispatch's), the merge-back, the changelog page and a prerelease's start and publish read it.
+        required: false
+      SHIPYARD_SLACK_BOT_TOKEN:
+        description: The Slack app's bot token, the org secret of that name (docs/release-ask.md). The ask and the announcement read it.
+        required: false
+      SHIPYARD_ORG_TOKEN:
+        description: A token that can read the approver team's members (docs/release-check.md, docs/release-prerelease.md). The release check and a prerelease read it.
+        required: false
+      WEB_BUILDS_APP_PRIVATE_KEY:
+        description: The web builds App key, for a docs site's preview and publish (docs/release-apps.md). No flow of this file reads it yet.
+        required: false
+
+permissions: {}
+
+jobs:
+  route:
+    name: route
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read   # check out the repo's files at the event's commit, as data, and read the repo's area and default branch
+      id-token: write  # learn which commit of this workflow is running (job_workflow_sha)
+    outputs:
+      flows: ${{ steps.route.outputs.flows }}
+      pr: ${{ steps.route.outputs.pr }}
+      head: ${{ steps.route.outputs.head }}
+      commit: ${{ steps.route.outputs.commit }}
+      prep: ${{ steps.route.outputs.prep }}
+      approvers: ${{ steps.route.outputs.approvers }}
+      automation-logins: ${{ steps.route.outputs.automation-logins }}
+      candidate: ${{ steps.route.outputs.candidate }}
+      binary: ${{ steps.route.outputs.binary }}
+      make-target: ${{ steps.route.outputs.make-target }}
+      test-target: ${{ steps.route.outputs.test-target }}
+      consumer: ${{ steps.route.outputs.consumer }}
+      ci-workflows: ${{ steps.route.outputs.ci-workflows }}
+      record-note: ${{ steps.route.outputs.record-note }}
+      tag-signal: ${{ steps.route.outputs.tag-signal }}
+      ship-note: ${{ steps.route.outputs.ship-note }}
+      tag-note: ${{ steps.route.outputs.tag-note }}
+      page-targets: ${{ steps.route.outputs.page-targets }}
+      after-ship: ${{ steps.route.outputs.after-ship }}
+      product: ${{ steps.route.outputs.product }}
+      floating-major: ${{ steps.route.outputs.floating-major }}
+      assets: ${{ steps.route.outputs.assets }}
+      shipped-assets-run-id: ${{ steps.route.outputs.shipped-assets-run-id }}
+      announce-tag: ${{ steps.route.outputs.announce-tag }}
+      reship: ${{ steps.route.outputs.reship }}
+      fixes: ${{ steps.route.outputs.fixes }}
+      pre-branch: ${{ steps.route.outputs.pre-branch }}
+      pre-version: ${{ steps.route.outputs.pre-version }}
+      pre-kind: ${{ steps.route.outputs.pre-kind }}
+    steps:
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/router.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows router.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Release router::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The event's commit: its `.github/shipyard.yml` and workflow files are read with git, never run.
+      - name: Check out the repo's files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: caller
+          persist-credentials: false
+
+      # The area and the default branch come from GitHub (the repo's `release_area` property), never from a file of the repo's.
+      - name: Decide the flows
+        id: route
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.inputs.action }}
+          ARGS: ${{ github.event.inputs.args }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          fail() { echo "::error title=Release router::$1"; exit 2; }
+          facts=$(gh api "repos/$GITHUB_REPOSITORY" --jq '[.default_branch, (.custom_properties.release_area // "")] | @tsv') \
+            || fail "could not read the repo's default branch and release_area property, so no flow runs"
+          IFS=$'\t' read -r default area <<< "$facts"
+          [ -n "$default" ] || fail "GitHub named no default branch, so no flow runs"
+          [ -n "$area" ] || fail "the repo has no release_area property: set it to the area that releases it, so its approvers are known. No flow runs"
+          args=(--event "$EVENT" --repo "$GITHUB_REPOSITORY" --area "$area" --default-branch "$default" --dir caller --ref "$GITHUB_REF")
+          [ -z "$ACTION" ] || args+=(--action "$ACTION")
+          [ -z "$ARGS" ] || args+=(--args "$ARGS")
+          [ -z "$BASE" ] || args+=(--base "$BASE")
+          [ -z "$PR" ] || args+=(--pr "$PR")
+          node shipyard/bin/shipyard route "${args[@]}" > "$RUNNER_TEMP/route.json" || fail "shipyard route could not decide, so no flow runs: the line above says why"
+          DECISION="$RUNNER_TEMP/route.json" node - <<'JS'
+          const fs = require('node:fs');
+          const d = JSON.parse(fs.readFileSync(process.env.DECISION, 'utf8'));
+          const say = (s) => String(s).replace(/[\p{Cc}\u2028\u2029]+/gu, ' ');
+          console.log(d.flows.length ? `Runs: ${d.flows.join(', ')}.` : `Runs nothing: ${say(d.message)}`);
+          for (const s of d.skipped) console.log(`Skipped ${s.flow}: ${say(s.why)}.`);
+          if (d.inputs['record-note']) console.log(`::warning title=Release router::${say(d.inputs['record-note'])}`);
+          if (d.inputs['ship-note']) console.log(`::warning title=Release router::${say(d.inputs['ship-note'])}`);
+          if (d.inputs['tag-note']) console.log(`::warning title=Release router::${say(d.inputs['tag-note'])}`);
+          if (d.flows.includes('check') && d.inputs.candidate) {
+            console.log("If this run builds the candidate, the release check is not run in it: the record names that run as its results, so it must end with success. The repo's own release-check caller checks such a release PR.");
+          }
+          // Each output is one line: JSON.stringify writes no line break, and every input is one line.
+          const lines = [`flows=${JSON.stringify(d.flows)}`];
+          for (const [name, value] of Object.entries(d.inputs)) {
+            if (/[\r\n]/.test(value)) throw new Error(`${name} holds a line break`);
+            lines.push(`${name}=${value}`);
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `${lines.join('\n')}\n`);
+          fs.writeFileSync(`${process.env.DECISION}.pr`, d.flows.includes('record') ? d.inputs.pr : '');
+          JS
+          # The candidate is built at the release PR's head: the event's, or, for a dispatch, the head GitHub holds now, and only
+          # for a release PR of this repo (a release/ branch of its own), as the event's own PR is held to in the jobs' if:.
+          head="$PR_HEAD"
+          pr=$(cat "$RUNNER_TEMP/route.json.pr")
+          if [[ -z "$head" && -n "$pr" ]]; then
+            pull=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '[.head.sha, .head.ref, (.head.repo.full_name // "")] | @tsv') \
+              || fail "could not read #$pr, the release PR args.pr names, so no flow runs"
+            IFS=$'\t' read -r head head_ref head_repo <<< "$pull"
+            if [[ "$head_repo" != "$GITHUB_REPOSITORY" || "$head_ref" != release/* ]]; then
+              fail "#$pr is not a release PR of this repo (its head is not a release/ branch of $GITHUB_REPOSITORY), so no flow runs"
+            fi
+          fi
+          [[ -z "$head" || "$head" =~ ^[0-9a-f]{40}$ ]] || fail "the release PR's head is not a commit, so no flow runs"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+
+  prep:
+    name: prep
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'prep')
+      && github.event_name == 'workflow_dispatch'
+      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions: {}   # the upload uses the run's own artifact token
+    uses: ./.github/workflows/prep.yml
+    with:
+      prep: ${{ needs.route.outputs.prep }}
+
+  cut:
+    name: cut
+    needs: [route, prep]
+    # After this run's prep job, which uploaded the prep file the cut reads from this run.
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'cut')
+      && needs.prep.result == 'success'
+      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: write       # push release/<version>
+      pull-requests: read
+      actions: read         # download the prep job's artifact
+      id-token: write
+    uses: ./.github/workflows/cut.yml
+    with:
+      commit: ${{ needs.route.outputs.commit }}
+      prep-run: ${{ github.run_id }}
+
+  # The candidate's results, which the record reads from this run: a Go CLI's build and tests, or a Go library's tests and the
+  # build of its main consumer. A review builds nothing: its record reads the run the page already names.
+  candidate-go-cli:
+    name: candidate
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'record')
+      && needs.route.outputs.candidate == 'go-cli'
+      && (github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && startsWith(github.event.pull_request.head.ref, 'release/')
+      && github.event.pull_request.head.repo.full_name == github.repository))
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/go-cli-results.yml
+    with:
+      ref: ${{ needs.route.outputs.head }}
+      binary: ${{ needs.route.outputs.binary }}
+      make-target: ${{ needs.route.outputs.make-target }}
+      test-target: ${{ needs.route.outputs.test-target }}
+
+  candidate-go-library:
+    name: candidate
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'record')
+      && needs.route.outputs.candidate == 'go-library'
+      && (github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && startsWith(github.event.pull_request.head.ref, 'release/')
+      && github.event.pull_request.head.repo.full_name == github.repository))
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/go-library-candidate.yml
+    with:
+      ref: ${{ needs.route.outputs.head }}
+      consumer: ${{ needs.route.outputs.consumer }}
+
+  record:
+    name: record
+    needs: [route, candidate-go-cli, candidate-go-library]
+    # After the candidate, or alone on a review (the candidate is skipped then, and a skipped job would skip this one without
+    # `!cancelled()`). A candidate that failed to run stops the record, and a repo Shipyard has no candidate build for runs no
+    # record (the route job's warning says why: `record-note`).
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'record')
+      && (github.event_name == 'workflow_dispatch'
+      || (startsWith(github.event.pull_request.head.ref, 'release/')
+      && github.event.pull_request.head.repo.full_name == github.repository))
+      && needs.route.outputs.candidate != ''
+      && (github.event_name == 'pull_request_review'
+      || needs.candidate-go-cli.result == 'success'
+      || needs.candidate-go-library.result == 'success')
+    permissions:
+      contents: write        # mark the release PR ready for review, or back to a draft; the record commits nothing
+      pull-requests: write   # write the body
+      issues: read
+      checks: read
+      statuses: write        # the dispatched runs' results, and shipyard/ask, on the PR's head
+      actions: write         # download the results, run the ci workflow, start the ask and the gate
+      id-token: write
+    uses: ./.github/workflows/record.yml
+    with:
+      pr: ${{ needs.route.outputs.pr }}
+      # unused on a review: it reads the release run the record on the page names
+      results-run: ${{ github.run_id }}
+      review: ${{ github.event_name == 'pull_request_review' }}
+      required-check-workflows: ${{ needs.route.outputs.ci-workflows }}
+      # The record starts the ask (on the default branch) and the gate (on main) through this same fixed file.
+      ask-workflow: shipyard-release.yml
+      gate-workflow: shipyard-release.yml
+
+  # Never in a run that builds the candidate: the record names that run as its results, and a review's record uses it only when
+  # it ended with success (lib/release-run.js). A release PR fails the check until it is approved (rule 9), so a check here would
+  # end the run with failure and every review's record would say HOLD. A release PR the run builds is checked by the repo's own
+  # `release-check.yml` caller (docs/release-check.md), which runs on each push, review and comment; this job checks the rest: a
+  # `check` dispatch, and a PR whose run builds nothing (a repo that owns `record`, a kind with no candidate build, another head).
+  check:
+    name: release-check
+    needs: [route, candidate-go-cli, candidate-go-library]
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'check')
+      && needs.candidate-go-cli.result == 'skipped'
+      && needs.candidate-go-library.result == 'skipped'
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      statuses: write       # the release-check status on the PR's head
+      id-token: write
+    uses: ./.github/workflows/release-check.yml
+    with:
+      approvers: ${{ needs.route.outputs.approvers }}
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+    secrets:
+      org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
+
+  # Enters the `slack` environment, which allows the default branch only.
+  ask:
+    name: ask
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'ask')
+      && github.event_name == 'workflow_dispatch'
+      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+    permissions:
+      contents: read
+      pull-requests: write   # the one note on the release PR that keeps the ask from posting twice
+      issues: read
+      id-token: write
+    uses: ./.github/workflows/ask.yml
+    with:
+      pr: ${{ needs.route.outputs.pr }}
+    secrets:
+      SHIPYARD_SLACK_BOT_TOKEN: ${{ secrets.SHIPYARD_SLACK_BOT_TOKEN }}
+
+  # Enters the `release` environment, which allows `main` only.
+  gate:
+    name: gate
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'gate')
+      && github.event_name == 'workflow_dispatch'
+      && github.ref == 'refs/heads/main'
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: read
+      statuses: read
+      actions: read
+      id-token: write
+    uses: ./.github/workflows/release-gate.yml
+    with:
+      pr: ${{ needs.route.outputs.pr }}
+      ask-workflow: shipyard-release.yml
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  # ---------------------------------------------------------------------------
+  # A push to a release branch (the merged release PR): ship, tag, merge-back, announce, afterShip. A repo that owns ship or tag
+  # has no job for it (the route job's decision); a push that is no release passes through each job with nothing to do.
+
+  # A Go CLI's build at the merge: goreleaser with the version from the release PR, publishing nothing; the tag job attaches the
+  # files. Runs the repo's make target and goreleaser file, with a read-only token and no key. A Go CLI built with cgo runs none
+  # (`ship-note`: it owns its ship).
+  ship:
+    name: ship
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'ship')
+      && needs.route.outputs.ship-note == ''
+      && github.event_name == 'push'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    uses: ./.github/workflows/go-cli-ship.yml
+    with:
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+      make-target: ${{ needs.route.outputs.make-target }}
+
+  # Enters the `release` environment, which allows `main` and `main-<x.y>` only. A Go CLI tags only once its ship job passed; a Go
+  # library, whose tag is the publish, tags at the merge. The merge-back is the job below, so a failed merge-back never fails this
+  # one.
+  tag:
+    name: tag
+    needs: [route, ship]
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'tag')
+      && github.event_name == 'push'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (needs.route.outputs.tag-signal == 'merge'
+      || (needs.route.outputs.tag-signal == 'ship-job' && needs.ship.result == 'success'))
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write        # tag.yml's `shipped` job starts a workflow; GitHub checks the grant of every job it holds
+      id-token: write
+    uses: ./.github/workflows/tag.yml
+    with:
+      signal: ${{ needs.route.outputs.tag-signal }}
+      ship-result: ${{ needs.route.outputs.tag-signal == 'ship-job' && needs.ship.result || '' }}
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+      floating-major: ${{ needs.route.outputs.floating-major == 'true' }}
+      merge-back: false
+      product: ${{ needs.route.outputs.product }}
+      assets: ${{ needs.route.outputs.assets }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  # Enters the `release` environment. After this run's tag job; or, for a repo that owns its tag, beside that tag, which the job
+  # waits up to 45 minutes to see (the tag job is skipped then, and a skipped job would skip this one without `!cancelled()`).
+  # A tag job that failed or one still to finish keeps it out: the merge-back follows the tag.
+  merge-back:
+    name: merge-back
+    needs: [route, tag]
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'merge-back')
+      && github.event_name == 'push'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (needs.tag.result == 'success' || !contains(fromJSON(needs.route.outputs.flows), 'tag'))
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    uses: ./.github/workflows/merge-back.yml
+    with:
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+      wait-for-tag-minutes: ${{ !contains(fromJSON(needs.route.outputs.flows), 'tag') && '45' || '0' }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  # The changelog page on the product's site repo (docs/release-announce.md), from the release notes, after the tag this run made:
+  # the page refuses by itself while the Release is not published, and a repo with no `announce.page` has no target and no job.
+  # Enters the `release` environment.
+  page:
+    name: page
+    needs: [route, tag]
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'tag')
+      && needs.route.outputs.page-targets != ''
+      && github.event_name == 'push'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && needs.tag.result == 'success'
+      && needs.tag.outputs.tag != ''
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    uses: ./.github/workflows/changelog-page.yml
+    with:
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+      page-targets: ${{ needs.route.outputs.page-targets }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  # The #releases line and the "Live in" comments. After the merge-back, which follows the tag, whatever its result: a merge-back
+  # that needs a person never holds the announcement back. The tag is the one this run made, or, for a repo that owns its tag, the
+  # one the merge-back found waiting for it (a push that is no release has none, and nothing is announced). An `announce` dispatch
+  # on the default branch, which a repo's own tag ends with, announces the tag it names. It posts with the org's Slack token, so it
+  # carries the actor check, though it enters no environment. announce.yml posts each output once per tag.
+  announce:
+    name: announce
+    needs: [route, tag, merge-back]
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'announce')
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && ((github.event_name == 'push'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (needs.tag.outputs.tag != '' || needs.merge-back.outputs.tag != ''))
+      || (github.event_name == 'workflow_dispatch'
+      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      && needs.route.outputs.announce-tag != ''))
+    permissions:
+      contents: read
+      pull-requests: write   # the release PR's note that the line was posted
+      issues: write          # "Live in" comments, and the Bug a failed output files
+      id-token: write
+    uses: ./.github/workflows/announce.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag || needs.merge-back.outputs.tag || needs.route.outputs.announce-tag }}
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+    secrets:
+      slack-token: ${{ secrets.SHIPYARD_SLACK_BOT_TOKEN }}
+
+  # The repo's own workflows named in `afterShip` (tailpipe's distro test), started on the default branch with the tag as their
+  # `version` input, once the tag is out: this run's, or, for a repo that owns its tag, the one the merge-back found. A workflow that cannot be started fails the job and names it.
+  after-ship:
+    name: after-ship
+    needs: [route, tag, merge-back]
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'afterShip')
+      && github.event_name == 'push'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (needs.tag.outputs.tag != '' || needs.merge-back.outputs.tag != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write   # start the repo's own workflows
+    steps:
+      - name: Start the afterShip workflows
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WORKFLOWS: ${{ needs.route.outputs.after-ship }}
+          TAG: ${{ needs.tag.outputs.tag || needs.merge-back.outputs.tag }}
+          REF: ${{ github.event.repository.default_branch }}
+        run: |
+          failed=0
+          IFS=',' read -r -a files <<< "$WORKFLOWS"
+          if [ "${#files[@]}" -eq 0 ]; then echo "::error title=afterShip::the route named no workflow to start"; exit 1; fi
+          for f in "${files[@]}"; do
+            if ! [[ "$f" =~ ^[A-Za-z0-9._-]{1,100}\.ya?ml$ ]]; then
+              echo "::error title=afterShip::\"${f//[^[:graph:]]/?}\" is not a workflow file name"; failed=1; continue
+            fi
+            if gh workflow run "$f" --ref "$REF" -f version="$TAG"; then
+              echo "Started $f on $REF for $TAG."
+            else
+              echo "::error title=afterShip::could not start $f on $REF: it must exist there and take workflow_dispatch with an input version"; failed=1
+            fi
+          done
+          exit "$failed"
+
+  # ---------------------------------------------------------------------------
+  # The dispatch actions of the other half of the table.
+
+  # `/shipped` on a merged release PR: the comment's run started this one on the PR's base branch, where the release environment
+  # lets the key through (tag.yml's `shipped` job form). `shipyard tag` reads the comment again and checks it. The repo's own ship
+  # may name the artifact of its run (`args.assets`, `args.assets-run-id`). Enters the `release` environment. The merge-back
+  # is tag.yml's own step here, as it is for a `/shipped` in a repo's own workflow.
+  shipped:
+    name: shipped
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'shipped')
+      && github.event_name == 'workflow_dispatch'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write        # tag.yml's `shipped` job starts a workflow; GitHub checks the grant of every job it holds
+      id-token: write
+    uses: ./.github/workflows/tag.yml
+    with:
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+      floating-major: ${{ needs.route.outputs.floating-major == 'true' }}
+      product: ${{ needs.route.outputs.product }}
+      assets: ${{ needs.route.outputs.assets }}
+      assets-run-id: ${{ needs.route.outputs.shipped-assets-run-id }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  # A re-ship: the cut again of a version whose release PR merged and whose ship failed, on the default branch, from the commit and
+  # version `args` name, with the fixes it lists. It needs no prep file.
+  reship:
+    name: reship
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'reship')
+      && github.event_name == 'workflow_dispatch'
+      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: write       # push release/<version>
+      pull-requests: read
+      actions: read         # cut.yml's job asks for it (a prep job's artifact); a reship has none, and GitHub checks the grant
+      id-token: write
+    uses: ./.github/workflows/cut.yml
+    with:
+      commit: ${{ needs.route.outputs.commit }}
+      reship: ${{ needs.route.outputs.reship }}
+      fixes: ${{ needs.route.outputs.fixes }}
+
+  # A prerelease, started on `main` or `main-<x.y>` (the release environment allows nothing else) by a person in the area's
+  # approver team, which the command checks with `SHIPYARD_ORG_TOKEN`. Both calls enter the `release` environment as far as
+  # GitHub's checks go (the workflow holds its publish job in both), so both carry the allow-list. Both grant what the workflow's
+  # publish job asks for, though the start step reads no PR.
+  prerelease-start:
+    name: prerelease-start
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'prerelease')
+      && github.event_name == 'workflow_dispatch'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    uses: ./.github/workflows/prerelease.yml
+    with:
+      step: start
+      commit: ${{ needs.route.outputs.commit }}
+      branch: ${{ needs.route.outputs.pre-branch }}
+      version: ${{ needs.route.outputs.pre-version }}
+      pre: ${{ needs.route.outputs.pre-kind }}
+      approvers: ${{ needs.route.outputs.approvers }}
+      product: ${{ needs.route.outputs.product }}
+    secrets:
+      org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
+      # The workflow's publish job reads it; this call runs its start step only, and GitHub checks the secrets of every job.
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  prerelease-publish:
+    name: prerelease-publish
+    needs: [route, prerelease-start]
+    if: >-
+      needs.route.result == 'success'
+      && needs.prerelease-start.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'prerelease')
+      && github.event_name == 'workflow_dispatch'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+    permissions:
+      contents: read
+      pull-requests: read   # the PRs' Changelog lines, for the Release's body
+      id-token: write
+    uses: ./.github/workflows/prerelease.yml
+    with:
+      step: publish
+      commit: ${{ needs.route.outputs.commit }}
+      branch: ${{ needs.route.outputs.pre-branch }}
+      version: ${{ needs.route.outputs.pre-version }}
+      pre: ${{ needs.route.outputs.pre-kind }}
+      approvers: ${{ needs.route.outputs.approvers }}
+      tag: ${{ needs.prerelease-start.outputs.tag }}
+      product: ${{ needs.route.outputs.product }}
+    secrets:
+      org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

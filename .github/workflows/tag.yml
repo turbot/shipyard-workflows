@@ -27,6 +27,10 @@
 # With the `assets` input (the name of an artifact the caller's ship job uploaded in this same run), the
 # tag job downloads it before the tag step, which makes the GitHub Release as a draft, attaches each file
 # and publishes it (a published Release takes no more files). The files are data: they are read, never run.
+# With `assets-run-id` as well (the id of another run of the caller's own repo that uploaded the artifact:
+# a service whose ship workflow is its own), the tag job downloads the artifact from that run instead, with
+# the job's own read-only token (`actions: read`). A run id that is not a number is refused in the first
+# step after the release-environment check, and an artifact that is missing from that run before anything is tagged; both name the id.
 #
 # Nothing here checks out the caller's repo or runs its code: GitHub is asked for the PR, the tags,
 # the commit, and its CHANGELOG and release notes files, and the PR's text is data. The job's own
@@ -75,10 +79,18 @@ on:
         description: 'The name of an artifact the caller''s ship job uploaded in this same workflow run: its files are attached to the GitHub Release, which is made as a draft and published once they are on it. With none named, the Release carries no files.'
         type: string
         default: ''
+      assets-run-id:
+        description: 'With `assets`: the id of another run of the caller''s repo that uploaded that artifact, as a number. The tag job downloads it from that run, with the job''s own read-only token, instead of from this run. A value that is not a number, or an artifact missing from that run, fails before anything is tagged. Empty: the artifact is of this same run.'
+        type: string
+        default: ''
     secrets:
       RELEASE_APP_PRIVATE_KEY:
         description: The release App's key, passed by name as the secret of the same name (docs/release-tag.md). Its value comes from the caller's release environment, and only the tag job, in that environment, reads it. A secret the caller does not pass is empty here.
         required: false
+    outputs:
+      tag:
+        description: The release's tag, when the run tagged a release (or found it already tagged). Empty when the push is no release, and when nothing was tagged. The router's announce job reads it.
+        value: ${{ jobs.tag.outputs.tag }}
 
 permissions: {}
 
@@ -153,9 +165,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35   # the merge-back waits up to 20 minutes for the PR's checks
     environment: release    # the caller's: RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY (docs/release-apps.md)
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     permissions:
       contents: read        # the tags, the merge commit, and its changelog and release notes
       pull-requests: read   # the release PR, and the commits a PR was merged as
+      actions: read         # the artifact of another run (`assets-run-id`); a caller already grants more for the `shipped` job
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
     steps:
       # Before anything is read: the release environment's names are there, and the run is on main or
@@ -174,6 +189,26 @@ jobs:
           [ "${#missing[@]}" -eq 0 ] || exit 1
           if ! [[ "$GITHUB_REF" =~ ^refs/heads/main(-(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?)?$ ]]; then
             echo "::error title=Tag::the release key is read only on main or main-<x.y>, and this run is on another ref. Nothing was tagged"
+            exit 1
+          fi
+
+      # The run the release files come from, when the caller names one: a number, with an artifact to
+      # fetch from it. Checked before anything is made, so a bad value tags nothing. The value is shown
+      # cut short and with no control character, so it cannot write a workflow command.
+      - name: Check the release files input
+        shell: bash
+        env:
+          ASSETS: ${{ inputs.assets }}
+          ASSETS_RUN_ID: ${{ inputs.assets-run-id }}
+        run: |
+          [ -n "$ASSETS_RUN_ID" ] || exit 0
+          shown="${ASSETS_RUN_ID//[^[:graph:] ]/?}"; shown="${shown:0:40}"
+          if ! [[ "$ASSETS_RUN_ID" =~ ^[1-9][0-9]{0,15}$ ]]; then
+            echo "::error title=Tag::assets-run-id \"$shown\" is not a run id: it is the number of a run of this repo. Nothing was tagged"
+            exit 1
+          fi
+          if [ -z "$ASSETS" ]; then
+            echo "::error title=Tag::assets-run-id $shown names a run, but assets names no artifact to download from it. Nothing was tagged"
             exit 1
           fi
 
@@ -235,12 +270,26 @@ jobs:
       # same way: the tag step is told, and a release is never tagged on part of its files). It holds no token of the release App's.
       - name: Download the release files
         id: download
-        if: ${{ inputs.assets != '' }}
+        if: ${{ inputs.assets != '' && inputs.assets-run-id == '' }}
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.assets }}
           path: ${{ runner.temp }}/release-assets
+
+      # The same, from another run of this repo (`assets-run-id`, a number the `Check the release files input` step checked). Only the
+      # job's own token reads it (`actions: read`), never the release App's, and only this repo's runs are
+      # searched. A run or an artifact that is not there fails this step, and the tag step refuses, naming the run.
+      - name: Download the release files of another run
+        id: download-run
+        if: ${{ inputs.assets != '' && inputs.assets-run-id != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.assets }}
+          path: ${{ runner.temp }}/release-assets
+          run-id: ${{ inputs.assets-run-id }}
+          github-token: ${{ github.token }}
 
       # Inputs reach the command as environment, never as shell text.
       - name: Tag the release
@@ -257,8 +306,9 @@ jobs:
           PRODUCT: ${{ inputs.product }}
           CHANGELOG: ${{ inputs.changelog }}
           ASSETS: ${{ inputs.assets }}
+          ASSETS_RUN_ID: ${{ inputs.assets-run-id }}
           ASSETS_DIR: ${{ runner.temp }}/release-assets
-          DOWNLOAD: ${{ steps.download.outcome }}
+          DOWNLOAD: ${{ inputs.assets-run-id == '' && steps.download.outcome || steps.download-run.outcome }}
         run: |
           # Never empty: with no one named, a release/ PR from any account that merged could be tagged.
           if [ -z "${AUTOMATION_LOGINS//[[:space:],]/}" ]; then echo "::error::automation-logins names no account: name the accounts that open release PRs"; exit 1; fi
@@ -268,6 +318,7 @@ jobs:
           [ -n "$SHIP_RESULT" ] && args+=(--ship-result "$SHIP_RESULT")
           [ "$FLOATING_MAJOR" = "true" ] && args+=(--floating-major)
           [ -n "$ASSETS" ] && args+=("--assets=$ASSETS" "--assets-dir=$ASSETS_DIR")
+          [ -n "$ASSETS" ] && [ -n "$ASSETS_RUN_ID" ] && args+=("--assets-run-id=$ASSETS_RUN_ID")
           [ -n "$ASSETS" ] && [ "$DOWNLOAD" != "success" ] && args+=(--assets-failed)
           node shipyard/bin/shipyard tag "${args[@]}"
 

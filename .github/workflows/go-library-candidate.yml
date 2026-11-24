@@ -1,0 +1,210 @@
+# The candidate's results of a Go library (docs/release-library.md): runs the library's own tests at the candidate commit, then builds
+# the library's main consumer with a `replace` that points at the candidate, and uploads `results.json` as the artifact `results`
+# that the record reads (record.yml, input `results-run`, docs/release-record.md). A library's own tests cannot see the break it
+# causes in a consumer; the consumer build can. A failed step is written as `fail` and the job goes on, so the record says HOLD; the
+# job itself fails only when it could not run.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit.
+#
+# A caller runs it as the `results` job of its release-PR workflow, with the candidate's head commit as `ref` and the main consumer
+# as `consumer`, then calls record.yml with `results-run: ${{ github.run_id }}`. The library's own part is its test target, if
+# `go test ./...` is not how it tests.
+#
+# The repo's code, and the consumer's, run here with a read-only token that is in no step's environment but the checkouts'. The
+# consumer is cloned with no credential, so it must be a public repo, and the job that builds it holds no OIDC permission: the job
+# that learns which commit of this workflow runs is a separate one that never touches either repo's code. Nothing a caller passes
+# is put into a shell line: each input reaches a step as an environment variable and is checked there.
+
+name: Go library candidate
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The candidate's full commit id (the release PR's head).
+        type: string
+        required: true
+      consumer:
+        description: 'The library''s main consumer, a public repo as <owner>/<name> (under .github/shipyard.yml, the first repo in `consumers`). It is built with a `replace` that points at the candidate.'
+        type: string
+        required: true
+      test-target:
+        description: The make target that runs the library's tests. Left empty, `go test ./...` runs.
+        type: string
+        default: ''
+      go-version-file:
+        description: The file that names the Go version, relative to the library.
+        type: string
+        default: go.mod
+
+permissions: {}
+
+jobs:
+  # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable workflow, which is the commit of shipyard to
+  # run. Only this job may ask for a token, so no code of the library's or the consumer's can.
+  find:
+    name: find
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    outputs:
+      sha: ${{ steps.self.outputs.sha }}
+    steps:
+      - name: Check the inputs
+        shell: bash
+        env:
+          REF: ${{ inputs.ref }}
+          CONSUMER: ${{ inputs.consumer }}
+          TEST_TARGET: ${{ inputs.test-target }}
+          GO_VERSION_FILE: ${{ inputs.go-version-file }}
+        run: |
+          fail() { echo "::error title=Go library candidate::$1"; exit 2; }
+          [[ "$REF" =~ ^[0-9a-f]{40}$ ]] || fail 'ref must be a full 40-character commit id'
+          [ -n "$CONSUMER" ] || fail 'consumer is empty: it names the library'"'"'s main consumer, a public repo as <owner>/<name> (under .github/shipyard.yml, the first repo in consumers), and the candidate cannot be tried against one without it'
+          [[ "$CONSUMER" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail 'consumer must be a repo as <owner>/<name>'
+          [[ -z "$TEST_TARGET" || "$TEST_TARGET" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || fail 'test-target is the name of one make target'
+          [[ "$GO_VERSION_FILE" =~ ^[A-Za-z0-9._/-]+$ && "$GO_VERSION_FILE" != -* && "$GO_VERSION_FILE" != /* && "$GO_VERSION_FILE" != *..* ]] || fail 'go-version-file must be a path inside the repo'
+
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/go-library-candidate.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows go-library-candidate.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Go library candidate::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+  results:
+    name: results
+    needs: find
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read        # the candidate, and this workflow's own commit
+    steps:
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ needs.find.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The candidate, with no credentials left in the checkout: the repo's own code runs from here on.
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          path: caller
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: caller/${{ inputs.go-version-file }}
+          cache: false
+
+      # Each result is kept and never stops the job: the record turns a failure into HOLD. The consumer is cloned with no credential
+      # and built with its `replace` pointing at the candidate, on a copy of its files that nothing keeps.
+      - name: Test the candidate and build its consumer
+        id: run
+        shell: bash
+        env:
+          TEST_TARGET: ${{ inputs.test-target }}
+          CONSUMER: ${{ inputs.consumer }}
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          workspace="$PWD"
+          scratch="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/consumer-build"
+          mkdir -p "$scratch"
+          log="$scratch/build.log"
+          : > "$log"
+          # A message on one line of a workflow command: its percent signs and line breaks are written out.
+          annotate() {
+            local msg="$1" pct='%' cr=$'\r' nl=$'\n'
+            msg="${msg//$pct/%25}"
+            msg="${msg//$cr/%0D}"
+            msg="${msg//$nl/%0A}"
+            echo "::error title=Go library candidate::${msg}"
+          }
+          tests=pass
+          if [ -n "$TEST_TARGET" ]; then (cd caller && make "$TEST_TARGET") || tests=fail; else (cd caller && go test ./...) || tests=fail; fi
+
+          # What the consumer build says went wrong, or nothing when it passed.
+          problem=''
+          module=$(cd caller && go list -m 2>>"$log") || module=''
+          if [ -z "$module" ]; then
+            problem='the candidate has no Go module to put in its place'
+          elif ! git clone --depth 1 --quiet "https://github.com/${CONSUMER}.git" "$scratch/consumer" >>"$log" 2>&1; then
+            problem='it could not be cloned (a consumer must be a public repo)'
+          elif ! (cd "$scratch/consumer" && GOWORK=off go mod edit -json) 2>>"$log" | MODULE="$module" node -e '
+            const mod = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+            process.exit((mod.Require || []).some((r) => r.Path === process.env.MODULE) ? 0 : 1);
+          '; then
+            problem="it does not require ${module}, so no build of it can show what the candidate does to it"
+          else
+            if ! (
+              cd "$scratch/consumer" || exit 1
+              # setup-go sets GOTOOLCHAIN=local; the consumer may need a newer Go than the library's.
+              export GOWORK=off GOFLAGS=-mod=mod GOTOOLCHAIN=auto
+              go mod edit -replace "${module}=${workspace}/caller" || exit 1
+              go build ./... || exit 1
+            ) >>"$log" 2>&1; then
+              problem='it did not build with the candidate in place of '"$module"
+            fi
+          fi
+          consumer=pass
+          if [ -n "$problem" ]; then
+            consumer=fail
+            echo '::group::The consumer build'
+            cat "$log"
+            echo '::endgroup::'
+            annotate "the main consumer ${CONSUMER}: ${problem}. $(tail -n 15 "$log")"
+          fi
+          {
+            echo "tests=$tests"
+            echo "consumer=$consumer"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Write results.json
+        shell: bash
+        env:
+          SOURCE: ${{ inputs.ref }}
+          CONSUMER: ${{ inputs.consumer }}
+          TESTS: ${{ steps.run.outputs.tests }}
+          BUILD: ${{ steps.run.outputs.consumer }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # A library makes no files: the digest is the commit's, and its one staging step is the build of its consumer.
+          node shipyard/bin/shipyard cli-results --source "$SOURCE" --source-digest \
+            --tests "tests=$TESTS" --steps "build of ${CONSUMER#*/}=$BUILD" --url "$RUN_URL" --out "$RUNNER_TEMP/results/results.json"
+
+      - name: Upload the results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: results
+          path: ${{ runner.temp }}/results/results.json
+          if-no-files-found: error
+          retention-days: 14

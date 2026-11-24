@@ -5,8 +5,8 @@
 # `v<major>` (`v0`), the tag each release moves to its own commit. See the README for the caller.
 #
 # Safe on `pull_request_target`: nothing here checks out or runs the PR's code. It reads
-# the base branch's .github/release.json and runs shipyard at the commit this workflow
-# itself was called at.
+# the base branch's .github/shipyard.yml (or .github/release.json while the repo has not moved) and runs
+# shipyard at the commit this workflow itself was called at.
 
 name: Changelog line
 
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: read        # check out the base branch's .github/release.json
+      contents: read        # check out the base branch's config file
       pull-requests: read   # read the PR and its files; nothing is written to a PR
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
     steps:
@@ -31,7 +31,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: caller
-          sparse-checkout: .github/release.json
+          sparse-checkout: |
+            .github/shipyard.yml
+            .github/release.json
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -76,4 +78,4 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: node shipyard/bin/shipyard changelog-line --config caller/.github/release.json
+        run: node shipyard/bin/shipyard changelog-line --config-dir caller

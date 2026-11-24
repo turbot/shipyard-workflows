@@ -33,6 +33,9 @@ const STEPS = {
   'changelog-page': () => require('../lib/changelog-page-command'),
   'open-release-pr': () => require('../lib/open-release-pr-command'),
   'cli-results': () => require('../lib/cli-results-command'),
+  'config-check': () => require('../lib/config-command'),
+  route: () => require('../lib/route-command'),
+  schedule: () => require('../lib/schedule-command'),
 };
 
 async function main(argv) {

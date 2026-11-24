@@ -41,7 +41,7 @@ on:
         type: string
         required: true
       prep-run:
-        description: The id of the Actions run of this repo that made the prep file. Its artifact `prep` holds `prep.json`. Give this or `prep-file`.
+        description: The id of the Actions run of this repo that made the prep file. Its artifact `prep` holds `prep.json`. Give this or `prep-file`. It may be this run itself, when a job this one needs made the file (the router runs prep, then the cut).
         type: string
         required: false
         default: ''
@@ -208,10 +208,15 @@ jobs:
           if [[ -n "$RESHIP" ]]; then echo 'A re-ship reads no prep file.'; exit 0; fi
           if [[ -n "$PROFILE" ]]; then echo 'A light release reads no prep file.'; exit 0; fi
           if [[ -n "$PREP_RUN" ]]; then
-            conclusion=$(gh run view "$PREP_RUN" --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)
-            if [[ "$conclusion" != "success" ]]; then
-              echo "::error title=Cut::run $PREP_RUN of this repo did not succeed (it is '$conclusion'), so its prep file is not used"
-              exit 1
+            # The router (router.yml) runs the prep job and then this one in one run, and names that run: it has not finished,
+            # so it has no conclusion yet. Its prep job is one this job needs, so it passed, and only a job of this run can have
+            # uploaded the artifact. Any other run must have finished with success.
+            if [[ "$PREP_RUN" != "$GITHUB_RUN_ID" ]]; then
+              conclusion=$(gh run view "$PREP_RUN" --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)
+              if [[ "$conclusion" != "success" ]]; then
+                echo "::error title=Cut::run $PREP_RUN of this repo did not succeed (it is '$conclusion'), so its prep file is not used"
+                exit 1
+              fi
             fi
             gh run download "$PREP_RUN" --repo "$GITHUB_REPOSITORY" --name prep --dir "$RUNNER_TEMP/prep-download"
             [[ -f "$RUNNER_TEMP/prep-download/prep.json" ]] || { echo "::error title=Cut::the artifact 'prep' of run $PREP_RUN holds no prep.json"; exit 1; }

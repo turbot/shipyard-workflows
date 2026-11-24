@@ -1,0 +1,164 @@
+# The central release start: runs `shipyard schedule` once, as the Start App, for every release repo of the
+# org (each repo with the `release_area` property). Each run decides which repos are due this hour, runs the
+# exact check of each due one and files its prep job; with `repo`, it starts that one repo now, whatever the time.
+# From Sunday to Tuesday the hourly run also makes the week's `Release report` issue when it is missing.
+# docs/release-schedule.md says what a run decides and files, and docs/release-start.md how a release starts.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to .github/workflows/ in
+# turbot/shipyard-workflows, and the one caller, turbot/shipyard's own hourly schedule, calls that copy at
+# `v0`, the tag each Shipyard release moves to its own commit. So the Start App's key only ever runs code a
+# person approved in a release, never a branch's or a PR's.
+#
+#   inputs.mode   shadow (decide, check and log; file nothing) or live (file, for a repo on .github/shipyard.yml)
+#   inputs.repo   empty: every release repo, as the hourly run does. <owner>/<name>: start that repo now
+#
+# The job runs in the caller's `start` environment, which allows the caller's default branch only. That
+# environment holds the App's ID (the variable `START_APP_ID`) and its key (`START_APP_PRIVATE_KEY`), which
+# the caller passes by name, never with `secrets: inherit`; the value is the environment's. The job first
+# checks the run is the caller's schedule or a run by hand on its default branch, and fails, reading nothing,
+# when the ID or the key is missing: it never falls back to its own token. Nothing of the caller's repo is
+# checked out or run: shipyard runs from the published copy at this workflow's own commit, and every repo it
+# reads is read through the API or a partial clone, as data. The inputs reach the command through `env:`,
+# and are checked there, never put in a shell line.
+
+name: Release schedule
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: 'shadow: decide, run each exact check and log what would be filed, and file nothing. live: file the prep job, for a repo whose default branch holds .github/shipyard.yml (every other repo stays in shadow).'
+        type: string
+        required: true
+      repo:
+        description: Start this one release repo now, whatever the time, as <owner>/<name>. Empty decides every release repo of the org, as the hourly run does.
+        type: string
+        required: false
+        default: ''
+    secrets:
+      START_APP_PRIVATE_KEY:
+        description: The Start App's key, passed by name as the secret of the same name (docs/release-start.md). Its value comes from the caller's start environment, and only the token step of the schedule job reads it. A secret the caller does not pass is empty here.
+        required: false
+
+permissions: {}
+
+jobs:
+  schedule:
+    name: schedule
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # One run at a time, so an hourly run and a run by hand cannot both file a prep job for the same start.
+    # A run that comes while one runs waits; GitHub keeps one waiting run, so a newer one replaces it.
+    concurrency:
+      group: shipyard-schedule-${{ github.repository }}
+      cancel-in-progress: false
+    # The caller's: START_APP_ID and START_APP_PRIVATE_KEY, on the default branch only (docs/release-start.md).
+    environment: start
+    permissions:
+      contents: read   # check out shipyard's published code at this workflow's commit
+      id-token: write  # learn which commit of this workflow is running (job_workflow_sha)
+    env:
+      MODE: ${{ inputs.mode }}
+      REPO: ${{ inputs.repo }}
+    steps:
+      # The environment already refuses another branch; this says so in words, before anything is read. Only
+      # whether the key is set reaches this step, never the key.
+      - name: Check the run and its inputs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_ID: ${{ vars.START_APP_ID }}
+          HAS_KEY: ${{ secrets.START_APP_PRIVATE_KEY != '' }}
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            schedule|workflow_dispatch) ;;
+            *) echo "::error title=Release schedule::the schedule runs from its caller's schedule or by hand, and this run is a ${GITHUB_EVENT_NAME//[^a-z_]/?} event. Nothing was started"; exit 1 ;;
+          esac
+          default=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
+          if [[ "$GITHUB_REF" != "refs/heads/$default" ]]; then
+            echo "::error title=Release schedule::the schedule runs on the default branch ($default) only, and this run is on another ref. Nothing was started"
+            exit 1
+          fi
+          [[ "$MODE" == shadow || "$MODE" == live ]] || { echo "::error title=Release schedule::mode must be shadow or live"; exit 2; }
+          [[ -z "$REPO" || "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$ ]] || { echo "::error title=Release schedule::repo must be <owner>/<name>, or empty"; exit 2; }
+          missing=()
+          [ -n "$APP_ID" ] || missing+=("the variable START_APP_ID is not set in the start environment")
+          [ "$HAS_KEY" = "true" ] || missing+=("the secret START_APP_PRIVATE_KEY is not set in the start environment, or the caller does not pass it by name")
+          for m in "${missing[@]}"; do echo "::error title=Release schedule::${m}: set it up as docs/release-start.md in turbot/shipyard says. Nothing was started"; done
+          [ "${#missing[@]}" -eq 0 ] || exit 1
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/schedule.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows schedule.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Release schedule::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # For every repo of the org the App is installed on, with only what the schedule uses: the org's
+      # release_area property, each release repo's files, tags, checks and statuses, its prep jobs (issues
+      # write; also the weekly report issue in the caller's own repo) and the one comment on a release:now PR
+      # (pull requests write). GitHub takes the App's ID where the client ID goes. The action revokes the token
+      # when the job ends.
+      - name: Make the Start App's token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.START_APP_ID }}
+          private-key: ${{ secrets.START_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-organization-custom-properties: read
+          permission-contents: read
+          permission-checks: read
+          permission-statuses: read
+          permission-issues: write
+          permission-pull-requests: write
+
+      # One run. The App's token is in this step's environment and no other's. The areas file is read through
+      # the API from the caller's default branch (org/areas.yml), as data.
+      - name: Run the schedule
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          args=("--$MODE")
+          [ -z "$REPO" ] || args+=(--repo "$REPO")
+          status=0
+          node shipyard/bin/shipyard schedule "${args[@]}" || status=$?
+          # The weekly report: the hourly run (not a run by hand for one repo) asks whether this week's issue is
+          # missing, from the clock and one issues call, and makes it when it is. A failed schedule does not skip it.
+          if [ -z "$REPO" ]; then
+            report=0
+            node shipyard/bin/shipyard schedule --report-if-due || report=$?
+            [ "$status" -ne 0 ] || status=$report
+          fi
+          exit "$status"

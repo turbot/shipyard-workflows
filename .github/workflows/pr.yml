@@ -15,9 +15,11 @@
 #   issue_comment        nothing yet. The comment commands move here with layer 2.
 #
 # Safe on `pull_request_target`: nothing here checks out or runs the PR's code, and no secret is
-# used. It reads the base branch's .github/release.json (a sweep reads each PR's base branch's through
-# the API), so a PR cannot edit the terms it is checked against, and runs shipyard at the commit this
-# workflow itself was called at.
+# used. It reads the base branch's .github/shipyard.yml, or .github/release.json while the repo has not moved
+# (a sweep reads each PR's base branch's through the API), so a PR cannot edit the terms it is checked against,
+# and runs shipyard at the commit this workflow itself was called at. A PR that changes .github/shipyard.yml
+# also has that file read at its head commit through the API, as data, and validated strictly: an unknown key
+# fails the status. No other reader of the file is strict.
 
 name: Shipyard PR
 
@@ -40,7 +42,7 @@ jobs:
     # commands); a called job may ask for less, so the token holds nothing a step here does not need. A test
     # (test/pr-permissions.test.js) fails when this list asks for a permission no step uses.
     permissions:
-      contents: read        # "Check out the repo's release config", and the sweep's read of each base branch's release.json
+      contents: read        # "Check out the repo's release config", the sweep's read of each base branch's config, and the read of a changed shipyard.yml at the PR head
       pull-requests: read   # both changelog-line steps read the PR and its files, and the sweep lists the open PRs; nothing is written to a PR
       statuses: write       # both changelog-line steps post the commit status shipyard/changelog-line
       id-token: write       # "Find this workflow's commit" asks for an OIDC token to learn job_workflow_sha
@@ -52,7 +54,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: caller
-          sparse-checkout: .github/release.json
+          sparse-checkout: |
+            .github/shipyard.yml
+            .github/release.json
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -100,9 +104,9 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: node shipyard/bin/shipyard changelog-line --status --config caller/.github/release.json
+        run: node shipyard/bin/shipyard changelog-line --status --config-dir caller
 
-      # Every open PR into `develop`, each against its own base branch's release.json read through the API.
+      # Every open PR into `develop`, each against its own base branch's config read through the API.
       - name: Check every open PR into the work branch
         if: github.event_name == 'workflow_dispatch'
         shell: bash

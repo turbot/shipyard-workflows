@@ -144,6 +144,21 @@
         }
       }
     },
+    "go-library-candidate.yml": {
+      "inputs": [
+        "consumer",
+        "ref"
+      ],
+      "secrets": [],
+      "jobs": {
+        "find": {
+          "id-token": "write"
+        },
+        "results": {
+          "contents": "read"
+        }
+      }
+    },
     "homebrew.yml": {
       "inputs": [
         "automation-logins",
@@ -155,6 +170,19 @@
       "secrets": [],
       "jobs": {
         "homebrew": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        }
+      }
+    },
+    "merge-back.yml": {
+      "inputs": [
+        "automation-logins"
+      ],
+      "secrets": [],
+      "jobs": {
+        "merge-back": {
           "contents": "read",
           "id-token": "write",
           "pull-requests": "read"
@@ -302,6 +330,126 @@
         }
       }
     },
+    "router.yml": {
+      "inputs": [],
+      "secrets": [],
+      "jobs": {
+        "after-ship": {
+          "actions": "write"
+        },
+        "announce": {
+          "contents": "read",
+          "id-token": "write",
+          "issues": "write",
+          "pull-requests": "write"
+        },
+        "ask": {
+          "contents": "read",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "write"
+        },
+        "candidate-go-cli": {
+          "contents": "read",
+          "id-token": "write"
+        },
+        "candidate-go-library": {
+          "contents": "read",
+          "id-token": "write"
+        },
+        "check": {
+          "contents": "read",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "read",
+          "statuses": "write"
+        },
+        "cut": {
+          "actions": "read",
+          "contents": "write",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
+        "gate": {
+          "actions": "read",
+          "checks": "read",
+          "contents": "read",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "read",
+          "statuses": "read"
+        },
+        "merge-back": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
+        "page": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
+        "prep": {},
+        "prerelease-publish": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
+        "prerelease-start": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
+        "record": {
+          "actions": "write",
+          "checks": "read",
+          "contents": "write",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "write",
+          "statuses": "write"
+        },
+        "reship": {
+          "actions": "read",
+          "contents": "write",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
+        "route": {
+          "contents": "read",
+          "id-token": "write"
+        },
+        "ship": {
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
+        "shipped": {
+          "actions": "write",
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        },
+        "tag": {
+          "actions": "write",
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "read"
+        }
+      }
+    },
+    "schedule.yml": {
+      "inputs": [
+        "mode"
+      ],
+      "secrets": [],
+      "jobs": {
+        "schedule": {
+          "contents": "read",
+          "id-token": "write"
+        }
+      }
+    },
     "secret-scan.yml": {
       "inputs": [],
       "secrets": [],
@@ -337,6 +485,7 @@
           "pull-requests": "read"
         },
         "tag": {
+          "actions": "read",
           "contents": "read",
           "id-token": "write",
           "pull-requests": "read"

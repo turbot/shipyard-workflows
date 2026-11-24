@@ -80,9 +80,9 @@ It stays factual and short, starts with its condition (`step-condition`), and sa
 
 The release PR's body is a page a person reads in under a minute: about 20 rendered lines above two folds. The top, in this order and nothing else:
 
-- the heading, `## <product> <version>: <headline>`, where the product is `product` in the repo's `.github/release.json` (the repo's name as it is, when it has none), a first release adds ` (first release)` after the version, and a report with `urgent: true` adds ` (urgent fix)` after it;
+- the heading, `## <product> <version>: <headline>`, where the product is `product` in the repo's config, `.github/shipyard.yml` or `.github/release.json` until it moves (the repo's name as it is, when it has none), a first release adds ` (first release)` after the version, and a report with `urgent: true` adds ` (urgent fix)` after it;
 - the decision table, which the tool writes from what it found: its header row is the decision (`❌ No: do not approve`, `⏳ Not yet: checks still running`, `🔁 Approve again: ...`, `✅ Approved: ready to merge` or `✅ Yes`), then the rows Checks, Production setup (when the repo turns the production plan on), During the deploy (when `report.duringDeploy` is set), A person's step (a row for each of `report.personSteps`), Approved by and Still needed;
-- **What changes for** the repo's `audience` (`visitors`, `customers` or `repos` in its `.github/release.json`; users when it has none): a Before \| Now table, a row for each change, the kind first (the first of the six labels, in their order, that groups a PR it covers: `Security`, `What's new`, `Bug fixes` and so on), then one line naming the `internal` changes. When no change is one a user sees: **What changes: nothing** they see, then each `internal` change as a bullet, 5 at most;
+- **What changes for** the repo's `audience` (`visitors`, `customers` or `repos` in its config; users when it has none): a Before \| Now table, a row for each change, the kind first (the first of the six labels, in their order, that groups a PR it covers: `Security`, `What's new`, `Bug fixes` and so on), then one line naming the `internal` changes. When no change is one a user sees: **What changes: nothing** they see, then each `internal` change as a bullet, 5 at most;
 - **Could it break anything?** with `safety.answer`, then `safety.why`, then an If \| Then table: a row for each of `risks` (an `untested` reason after its If text), and last, how to go back: the version, which the tool names, then `undo.how` and `undo.howLong`.
 
 Then two folds, never one inside another: **What gets published**, a table of where each text goes and each text word for word (the GitHub Release's text, the CHANGELOG section, and the release notes), and **Evidence**, with a table of who asked for, made and reviewed each change, a table of the checks, a table of the facts of the release and what happens on merge. `managerNotes` are a comment on the PR.
@@ -278,9 +278,9 @@ The flag's id is `caller-needs-<workflow>-<kind>-<name>`, with the job after the
 | `repo.private` | `true` or `false`. A link into the product repo is private when the repo is. |
 | `prs[].number` | Each PR in the range. |
 | `flags[].id` | Each read-first flag. A raised caller need has one, `caller-needs-<workflow>-<kind>-<name>` (see [What callers must give](#what-callers-must-give)). |
-| `product` | Optional. The product's display name, `product` in its `.github/release.json`. |
-| `audience` | Optional. Whom the release is for, `audience` in its `.github/release.json`: `visitors`, `customers` or `repos`. The page's What changes heading names them. |
-| `profile` | Optional. `light` when its `.github/release.json` says `"profile": "light"` ([Light releases](how-we-release.md#light-releases)): the release has no prep file, and the facts are all its page and its GitHub Release are made from. Absent for a full release. |
+| `product` | Optional. The product's display name, `product` in its config (`.github/shipyard.yml`, or `.github/release.json` until the repo moves). |
+| `audience` | Optional. Whom the release is for, `audience` in its config: `visitors`, `customers` or `repos`. The page's What changes heading names them. |
+| `profile` | Optional. `light` when its config says `"profile": "light"` ([Light releases](how-we-release.md#light-releases)): the release has no prep file, and the facts are all its page and its GitHub Release are made from. Absent for a full release. |
 | `patch` | Optional. Only a patch's facts have it (`shipyard facts --fixes`, [release-cut.md](release-cut.md#a-patch)): the range runs from the production tag to the tip of its branch, and `prs` are the fixes, already merged into the work branch, that the cut picks onto it. The level is `patch`. |
 | `patch.workBranch` | The work branch the fixes merged into, where the patch was started (`develop`). |
 | `patch.fixes[].commit`, `patch.fixes[].pr` | Each fix: its merge commit on the work branch and its PR, in the order the cut picks them. |
@@ -293,7 +293,7 @@ The flag's id is `caller-needs-<workflow>-<kind>-<name>`, with the job after the
 | `callerNeeds[].name` | The permission, the input or the secret. |
 | `callerNeeds[].job` | For a permission, the job that asks for it. |
 | `callerNeeds[].from`, `callerNeeds[].to` | For a permission, the most the workflow asked for before (`none`, `read` or `write`) and what it asks for now (`read` or `write`). |
-| `internalTerms` | The repo's internal terms (`notes.internalTerms` in its `.github/release.json`), a list that may be empty. |
+| `internalTerms` | The repo's internal terms (`notes.internalTerms` in its config), a list that may be empty. |
 | `publicRepos` | Optional. Other repos the release notes may link to, `<owner>/<name>`. |
 | `privateHosts` | Optional. More hosts whose pages count as private, such as `wiki.example.com`. |
 

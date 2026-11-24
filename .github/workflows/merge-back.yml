@@ -1,0 +1,147 @@
+# Merges a tagged release back into the work branch its candidate was cut from (docs/release-tag.md, "The merge-back"): one PR from
+# the release branch into the work branch, made as the area's release App and merged with a merge commit once the work branch's
+# required checks pass. It is the step `tag.yml` runs after the tag when its `merge-back` input is on, as a job of its own, for a
+# caller that tags elsewhere: the router (`router.yml`) runs it after its own tag job, and beside a repo's own tag workflow, where
+# `wait-for-tag-minutes` lets it wait for that tag. It never runs ahead of the tag: with no tag at the merge commit it refuses,
+# and a run again finishes what is left (nothing it did is done twice).
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit. A caller runs it from a push to main or main-*.
+#
+# Like tag.yml it runs in the caller's `release` environment (docs/release-apps.md), which only main and main-<x.y> can use, and
+# makes the release App's token there: contents write and pull-requests write, with checks read and commit statuses read for the
+# wait on the work branch's checks. Nothing here checks out the caller's repo or runs its code: GitHub is asked for the release PR,
+# the tag and the checks, and their text is data. Nothing a caller passes is put into a shell line: each input reaches a step as an
+# environment variable and is checked there.
+
+name: Merge back
+
+on:
+  workflow_call:
+    inputs:
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        default: v
+      automation-logins:
+        description: 'The accounts that open release PRs, comma-separated. Required: a merged release/ PR from any other account is never merged back.'
+        type: string
+        required: true
+      wait-for-tag-minutes:
+        description: 'A whole number of minutes, at most 60: how long to wait for the release tag to appear at the merge commit before refusing, for a repo whose tag is made by its own workflow in the same push. 0 (the default) does not wait: the tag job this one needs has made it.'
+        type: string
+        default: '0'
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: The release App's key, passed by name as the secret of the same name (docs/release-tag.md). Its value comes from the caller's release environment, and only this job reads it. A secret the caller does not pass is empty, and the job refuses before anything is read.
+        required: false
+    outputs:
+      tag:
+        description: The release's tag once it is found at the merge commit, even when the merge-back itself then fails. Empty when the push is no release and when no tag appeared. A repo that tags in its own workflow has its announcement follow this.
+        value: ${{ jobs.merge-back.outputs.tag }}
+
+permissions: {}
+
+jobs:
+  merge-back:
+    name: merge-back
+    runs-on: ubuntu-latest
+    timeout-minutes: 90   # up to an hour for the tag, then up to 20 minutes for the PR's checks
+    outputs:
+      tag: ${{ steps.merge.outputs.tag }}
+    environment: release    # the caller's: RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY (docs/release-apps.md)
+    permissions:
+      contents: read        # the tags, the merge commit, and this workflow's own commit
+      pull-requests: read   # the release PR, and the commits a PR was merged as
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      # Before anything is read: the release environment's names are there, and the run is on main or main-<x.y>, the only
+      # branches the environment may let reach the key. Never the job's own token in place of the App's. Only whether the key
+      # is set reaches this step, never the key.
+      - name: Check the release environment
+        shell: bash
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          HAS_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          WAIT_FOR_TAG: ${{ inputs.wait-for-tag-minutes }}
+        run: |
+          missing=()
+          [ -n "$CLIENT_ID" ] || missing+=("the variable RELEASE_APP_CLIENT_ID is not set in the release environment")
+          [ "$HAS_KEY" = "true" ] || missing+=("the secret RELEASE_APP_PRIVATE_KEY is not set in the release environment, or the caller does not pass it by name")
+          for m in "${missing[@]}"; do echo "::error title=Merge back::${m}: set it up as docs/release-apps.md and docs/release-tag.md in turbot/shipyard say. Nothing was merged back"; done
+          [ "${#missing[@]}" -eq 0 ] || exit 1
+          if ! [[ "$GITHUB_REF" =~ ^refs/heads/main(-(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?)?$ ]]; then
+            echo "::error title=Merge back::the release key is read only on main or main-<x.y>, and this run is on another ref. Nothing was merged back"
+            exit 1
+          fi
+          [ -n "${AUTOMATION_LOGINS//[[:space:],]/}" ] || { echo "::error title=Merge back::automation-logins names no account: name the accounts that open release PRs"; exit 1; }
+          if ! [[ "$WAIT_FOR_TAG" =~ ^[0-9]{1,2}$ ]] || [ "$WAIT_FOR_TAG" -gt 60 ]; then
+            shown="${WAIT_FOR_TAG//[^[:graph:] ]/?}"; shown="${shown:0:20}"
+            echo "::error title=Merge back::wait-for-tag-minutes \"$shown\" is not a whole number of minutes, at most 60. Nothing was merged back"
+            exit 1
+          fi
+
+      - name: Find this workflow's commit
+        # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+        # workflow, which is the commit of shipyard to run.
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/merge-back.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows merge-back.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Merge back::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # For this repo only, with only what the merge-back uses. The action revokes it when the job ends.
+      - name: Make the release App's token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          # The merge-back waits for the PR's checks, and the job's own token reads neither.
+          permission-checks: read
+          permission-statuses: read
+
+      # Inputs reach the command as environment, never as shell text.
+      - name: Merge the release back
+        id: merge
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.app.outputs.token }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          WAIT_FOR_TAG: ${{ inputs.wait-for-tag-minutes }}
+        run: node shipyard/bin/shipyard merge-back --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --wait-for-tag-minutes "$WAIT_FOR_TAG"

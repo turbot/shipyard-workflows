@@ -108,12 +108,12 @@ on:
         required: false
         default: '10'
       ask-workflow:
-        description: The file name of this repo's ask workflow (in .github/workflows), such as `ask.yml`. It must accept `workflow_dispatch` with an input `pr`. When it is set and the record has just written SHIP at the PR's head, the record starts it on the default branch with the PR's number, once for each head, because a CLI's release PR is opened with the job's token and so starts no `workflow_run` of its own. A run of it is not judged by the record. Left empty, nothing is started (docs/release-ask.md).
+        description: The file name of this repo's ask workflow (in .github/workflows), such as `ask.yml`. It must accept `workflow_dispatch` with an input `pr`, or, for `shipyard-release.yml`, with the inputs `action` and `args`. When it is set and the record has just written SHIP at the PR's head, the record starts it on the default branch with the PR's number, once for each head, because a CLI's release PR is opened with the job's token and so starts no `workflow_run` of its own. A run of it is not judged by the record. Left empty, nothing is started (docs/release-ask.md).
         type: string
         required: false
         default: ''
       gate-workflow:
-        description: The file name of this repo's release gate workflow (in .github/workflows), such as `release-gate.yml`. It must accept `workflow_dispatch` with an input `pr`, and call `release-gate.yml` of this repo's shipyard (docs/release-gate.md). When it is set, the record sets no `shipyard/release` commit status, and once it has written the page it starts the gate on `main` with the PR's number, and the gate posts `shipyard/release` as a check run with the area's release App, the one source `main` accepts. Left empty, the record sets the status itself, as before.
+        description: The file name of this repo's release gate workflow (in .github/workflows), such as `release-gate.yml`. It must accept `workflow_dispatch` with an input `pr` (`shipyard-release.yml` takes the inputs `action` and `args`), and call `release-gate.yml` of this repo's shipyard (docs/release-gate.md). When it is set, the record sets no `shipyard/release` commit status, and once it has written the page it starts the gate on `main` with the PR's number, and the gate posts `shipyard/release` as a check run with the area's release App, the one source `main` accepts. Left empty, the record sets the status itself, as before.
         type: string
         required: false
         default: ''
@@ -645,8 +645,15 @@ jobs:
           fi
           default=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch) \
             || { warn "could not read the default branch, so the ask is not started"; exit 0; }
-          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/$ASK_WORKFLOW/dispatches" -f ref="$default" -f "inputs[pr]=$PR" > /dev/null; then
-            warn "the ask workflow $ASK_WORKFLOW could not be started on $default: it must exist there and accept workflow_dispatch with an input pr. Run it by hand for #$PR"
+          # The fixed release file takes `action` and `args` and no other input (lib/dispatch-inputs.js, ROUTER_WORKFLOW); GitHub
+          # refuses an input a workflow does not declare, so any other ask workflow is started with `pr` as before.
+          if [[ "$ASK_WORKFLOW" == shipyard-release.yml ]]; then
+            fields=(-f "inputs[action]=ask" -f "inputs[args]={\"pr\":$PR}")
+          else
+            fields=(-f "inputs[pr]=$PR")
+          fi
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/$ASK_WORKFLOW/dispatches" -f ref="$default" "${fields[@]}" > /dev/null; then
+            warn "the ask workflow $ASK_WORKFLOW could not be started on $default: it must exist there and accept workflow_dispatch with an input pr (shipyard-release.yml takes the inputs action and args). Run it by hand for #$PR"
             exit 0
           fi
           echo "Started $ASK_WORKFLOW on $default for #$PR (the record at $short says SHIP)."

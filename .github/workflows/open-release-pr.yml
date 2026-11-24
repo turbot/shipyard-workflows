@@ -21,7 +21,7 @@ on:
         type: string
         default: main
       record-workflow:
-        description: 'The file name of the repo''s workflow that calls record.yml (release-pr.yml). It must take workflow_dispatch with an input `pr`. Left empty, nothing is started.'
+        description: 'The file name of the repo''s workflow that calls record.yml (release-pr.yml). It must take workflow_dispatch with an input `pr` (`shipyard-release.yml` takes the inputs `action` and `args`). Left empty, nothing is started.'
         type: string
         default: ''
 
