@@ -68,7 +68,7 @@ on:
         type: boolean
         default: true
       product:
-        description: 'The product''s name, for a GitHub Release title when the release has no release notes ("<product> v<version>"). Default: the repo''s name.'
+        description: 'No longer used: a GitHub Release is named with its tag. Still accepted, so a caller that passes it keeps working.'
         type: string
         default: ''
       changelog:

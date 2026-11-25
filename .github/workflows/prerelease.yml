@@ -9,19 +9,26 @@
 #
 # The caller is a workflow_dispatch on `main` (the release environment allows main only, so the key is
 # never reachable from a work branch), with the commit, the work branch, the version and the kind as
-# inputs. It calls this workflow twice, around its own build:
+# inputs. It calls this workflow twice, around the build, which is prerelease-build.yml:
 #
-#   step: start     checks who started the run (and who ran it again), the branch, the commit and the
-#                   version, and outputs the tag and the version for the build. No release key.
-#   (the build)     the caller's own job builds the commit with that version and uploads its files.
-#   step: publish   in the caller's `release` environment: checks all of it again, then makes the tag,
-#                   the GitHub Release (marked as a prerelease, never "latest") and attaches the files.
-#                   The Release's body is the `Changelog:` lines of the PRs since the newest release.
+#   step: start     in the caller's `release` environment: checks who started the run (and who ran it
+#                   again), the branch, the commit and the version, and outputs the tag and the version
+#                   for the build. It can write nothing.
+#   (the build)     prerelease-build.yml, with no environment and no secret: starts the repo's build workflow on
+#                   the work branch, which builds the branch's tip with that tag as its version and uploads its
+#                   files, waits for that run, and outputs its id. No code of the commit runs under `main`, so
+#                   nothing the commit holds reaches `main`'s cache or the key.
+#   step: publish   in the caller's `release` environment: checks all of it again, checks that the build run
+#                   is the build of this commit on this branch, then makes the tag, the GitHub Release (marked
+#                   as a prerelease, never "latest") and attaches the run's files. The Release's body is the
+#                   `Changelog:` lines of the PRs since the newest release.
 #
-# Who may start one is read from the approver team with `org-token`: the job's own token cannot see a
-# team. Nothing here checks out the caller's repo or runs its code: GitHub is asked for the commit, the
-# branch, the tags and the PRs since the newest release. The release App's token is made in the publish job and is in the environment of
-# its last step alone. The files are data: they are read, never run.
+# Who may start one is read from the approver team with a token each job makes from the area's release
+# App, with organization Members: read alone, revoked when the job ends: the job's own token cannot see a
+# team, and no org token is stored (docs/release-apps.md). Nothing here checks out the caller's repo or
+# runs its code: GitHub is asked for the commit, the branch, the tags, the build's run and the PRs since the newest
+# release. The release App's token that writes is made in the publish job, for this repo with contents
+# write alone, and is in the environment of its last step alone. The files are data: they are read, never run.
 
 name: Prerelease
 
@@ -65,15 +72,20 @@ on:
         type: string
         default: ''
       assets:
-        description: 'With step publish: the name of an artifact the caller''s build uploaded in this same workflow run. Its files are attached to the Release, which is made as a draft and published once they are on it. With none named, the Release carries no files.'
+        description: 'With step publish: the name the build run (build-run) uploaded its artifact under, without the tag: the artifact is `<assets>-<tag>` (prerelease-assets-v1.5.0-rc.1). Its files are attached to the Release, which is made as a draft and published once they are on it. With none named, the Release carries no files.'
+        type: string
+        default: ''
+      build-workflow:
+        description: 'With step publish when assets is named: the file name of the repo''s build workflow, the one prerelease-build.yml started (docs/release-prerelease.md).'
+        type: string
+        default: ''
+      build-run:
+        description: 'With step publish when assets is named: the id of the build run (needs.<build job>.outputs.run of prerelease-build.yml). It must be a run of build-workflow on the work branch, at the commit, that ended with success.'
         type: string
         default: ''
     secrets:
-      org-token:
-        description: A token that can read the approver team's members. Without it the run refuses, as nobody could be told apart.
-        required: true
       RELEASE_APP_PRIVATE_KEY:
-        description: With step publish, the release App's key, passed by name as the secret of the same name (docs/release-tag.md). Its value comes from the caller's release environment, and only the publish job reads it.
+        description: With both steps, the release App's key, passed by name as the secret of the same name (docs/release-tag.md). Its value comes from the caller's release environment. Both jobs make a token from it to read the approver team; only the publish job makes one that writes.
         required: false
     outputs:
       tag:
@@ -91,6 +103,7 @@ jobs:
     if: ${{ inputs.step == 'start' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: release    # the caller's: RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY, for the team's token alone
     permissions:
       contents: read        # the commit, the branch and the tags
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
@@ -98,6 +111,25 @@ jobs:
       tag: ${{ steps.start.outputs.tag }}
       version: ${{ steps.start.outputs.version }}
     steps:
+      # Before anything is read: the release environment's names are there, and the run is on main or
+      # main-<x.y>, the only branches the environment may let reach the key. Never the job's own token
+      # in place of the App's. Only whether the key is set reaches this step, never the key.
+      - name: Check the release environment
+        shell: bash
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          HAS_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          missing=()
+          [ -n "$CLIENT_ID" ] || missing+=("the variable RELEASE_APP_CLIENT_ID is not set in the release environment")
+          [ "$HAS_KEY" = "true" ] || missing+=("the secret RELEASE_APP_PRIVATE_KEY is not set in the release environment, or the caller does not pass it by name")
+          for m in "${missing[@]}"; do echo "::error title=Prerelease::${m}: set it up as docs/release-apps.md and docs/release-prerelease.md in turbot/shipyard say. Nothing was made"; done
+          [ "${#missing[@]}" -eq 0 ] || exit 1
+          if ! [[ "$GITHUB_REF" =~ ^refs/heads/main(-(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?)?$ ]]; then
+            echo "::error title=Prerelease::the release key is read only on main or main-<x.y>: start the prerelease workflow on main, naming the work branch's commit. Nothing was made"
+            exit 1
+          fi
+
       - name: Find this workflow's commit
         # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
         # workflow, which is the commit of shipyard to run.
@@ -135,6 +167,18 @@ jobs:
           path: shipyard
           persist-credentials: false
 
+      # To read the approver team: for the org, with organization Members: read alone, so it can write
+      # nothing and reads no repo's code. The release App needs that permission (docs/release-apps.md);
+      # until it has it, this step fails and nothing is made. The action revokes the token when the job ends.
+      - name: Make the token that reads the approver team
+        id: team
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-members: read
+
       # Inputs reach the command as environment, never as shell text. GITHUB_EVENT_NAME, GITHUB_ACTOR and
       # GITHUB_TRIGGERING_ACTOR are the runner's own: who started the run, and who ran it again.
       - name: Check the run and name the tag
@@ -142,7 +186,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SHIPYARD_ORG_TOKEN: ${{ secrets.org-token }}
+          APPROVERS_TOKEN: ${{ steps.team.outputs.token }}
           COMMIT: ${{ inputs.commit }}
           BRANCH: ${{ inputs.branch }}
           VERSION: ${{ inputs.version }}
@@ -162,6 +206,7 @@ jobs:
     permissions:
       contents: read        # the commit, the branch, the tags, the Release and .github/release.json
       pull-requests: read   # the Changelog lines of the PRs since the newest release, for the Release's body
+      actions: read         # the build run and its files, which another run of this repo made
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
     steps:
       # Before anything is read: the release environment's names are there, and the run is on main or
@@ -220,6 +265,18 @@ jobs:
           path: shipyard
           persist-credentials: false
 
+      # To read the approver team: for the org, with organization Members: read alone, so it can write
+      # nothing and reads no repo's code. The release App needs that permission (docs/release-apps.md);
+      # until it has it, this step fails and nothing is made. The action revokes the token when the job ends.
+      - name: Make the token that reads the approver team
+        id: team
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-members: read
+
       # For this repo only, with contents write alone: the tag and the Release. The action revokes it when the job ends.
       - name: Make the release App's token
         id: app
@@ -230,24 +287,28 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
 
-      # The build's files, when the caller names an artifact. This step may fail and go on: the publish step
-      # is told, and refuses before anything is tagged (a download that failed partway is refused the same
-      # way), naming the artifact. It holds no token of the release App's.
+      # The build's files, from the build run on the work branch, when the caller names an artifact. Only the job's own token
+      # reads it (`actions: read`), never the release App's, and only this repo's runs are searched. The publish step
+      # checks the run is this commit's build on this branch before it reads a file. This step may fail and go on: the publish
+      # step is told, and refuses before anything is tagged (a download that failed partway is refused the same way), naming the
+      # artifact.
       - name: Download the build's files
         id: download
-        if: ${{ inputs.assets != '' }}
+        if: ${{ inputs.assets != '' && inputs.build-run != '' }}
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ${{ inputs.assets }}
+          name: ${{ inputs.assets }}-${{ inputs.tag }}
           path: ${{ runner.temp }}/prerelease-assets
+          run-id: ${{ inputs.build-run }}
+          github-token: ${{ github.token }}
 
       # Inputs reach the command as environment, never as shell text.
       - name: Make the tag and the Release
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SHIPYARD_ORG_TOKEN: ${{ secrets.org-token }}
+          APPROVERS_TOKEN: ${{ steps.team.outputs.token }}
           RELEASE_TOKEN: ${{ steps.app.outputs.token }}
           COMMIT: ${{ inputs.commit }}
           BRANCH: ${{ inputs.branch }}
@@ -259,10 +320,12 @@ jobs:
           PRODUCT: ${{ inputs.product }}
           ASSETS: ${{ inputs.assets }}
           ASSETS_DIR: ${{ runner.temp }}/prerelease-assets
+          BUILD_WORKFLOW: ${{ inputs.build-workflow }}
+          BUILD_RUN: ${{ inputs.build-run }}
           DOWNLOAD: ${{ steps.download.outcome }}
         run: |
           args=(--step publish --commit "$COMMIT" --branch "$BRANCH" --version "$VERSION" --pre "$PRE" --approvers "$APPROVERS" --tag-prefix "$TAG_PREFIX" --tag "$TAG")
           [ -n "$PRODUCT" ] && args+=("--product=$PRODUCT")
-          [ -n "$ASSETS" ] && args+=("--assets=$ASSETS" "--assets-dir=$ASSETS_DIR")
+          [ -n "$ASSETS" ] && args+=("--assets=$ASSETS" "--assets-dir=$ASSETS_DIR" "--build-workflow=$BUILD_WORKFLOW" "--build-run=$BUILD_RUN")
           [ -n "$ASSETS" ] && [ "$DOWNLOAD" != "success" ] && args+=(--assets-failed)
           node shipyard/bin/shipyard prerelease "${args[@]}"

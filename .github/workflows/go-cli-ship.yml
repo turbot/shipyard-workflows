@@ -214,12 +214,57 @@ jobs:
               || { echo "::error title=Go CLI ship::the sibling $item could not be cloned with no credential: it must be a public repo, and its branch or tag must exist (build.siblings in .github/shipyard.yml, or the siblings input)"; exit 1; }
           done
 
+      # Every module the build needs is downloaded first, with a few tries: one error from the Go module proxy must not fail a release
+      # whose own CI passed, not in the tests, the make target, goreleaser's own hooks (`go mod tidy`) nor the build. What runs after reads
+      # this cache (GOMODCACHE, a folder of this run's own, which a build container mounts too). The same step, word for word, is in
+      # go-cli-results.yml, go-cli-ship.yml and go-cli-prerelease-build.yml (a test keeps it so). A download that fails on every try
+      # fails the step, and its error names the module and what the proxy said.
+      - name: Download the Go modules
+        if: ${{ steps.version.outputs.release == 'true' }}
+        shell: bash
+        working-directory: caller
+        env:
+          SIBLINGS: ${{ inputs.siblings }}
+          GOMODCACHE: ${{ runner.temp }}/gomodcache
+        run: |
+          tries="${MODULE_TRIES:-4}"
+          pause="${MODULE_WAIT:-5}"
+          mkdir -p "$GOMODCACHE"
+          # The repo, then each sibling its go.mod replaces: each is a module of its own.
+          dirs=(.)
+          IFS=',' read -ra listed <<< "$SIBLINGS"
+          for item in "${listed[@]}"; do
+            item="${item//[[:space:]]/}"
+            [ -n "$item" ] || continue
+            repo="${item%%@*}"
+            dirs+=("../${repo#*/}")
+          done
+          errs="$RUNNER_TEMP/go-mod-download.err"
+          for dir in "${dirs[@]}"; do
+            [ -f "$dir/go.mod" ] || continue
+            n=1
+            until (cd "$dir" && go mod download 2>"$errs"); do
+              cat "$errs"
+              if [ "$n" -ge "$tries" ]; then
+                # One line, with no `%` left to be read as an escape: the proxy's own words name the module and the error.
+                detail="$(tr '\r\n' '  ' < "$errs" | cut -c1-400 | sed 's/[[:space:]]*$//')"
+                where="${dir#../}"; [ "$where" != . ] || where="the repo"
+                echo "::error title=Go CLI ship::the Go modules of $where could not be downloaded after $n tries: ${detail//%/%25}"
+                exit 1
+              fi
+              echo "go mod download in $dir failed (try $n of $tries): trying again in $((pause * n))s"
+              sleep "$((pause * n))"
+              n=$((n + 1))
+            done
+          done
+
       - name: Run the repo's make target
         if: ${{ steps.version.outputs.release == 'true' && inputs.make-target != '' }}
         shell: bash
         working-directory: caller
         env:
           MAKE_TARGET: ${{ inputs.make-target }}
+          GOMODCACHE: ${{ runner.temp }}/gomodcache
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
         run: make "$MAKE_TARGET"
@@ -236,12 +281,14 @@ jobs:
           BUILD_IMAGE: ${{ inputs.build-image }}
           SIBLINGS: ${{ inputs.siblings }}
           PLATFORM: ${{ inputs.platform }}
+          GOMODCACHE: ${{ runner.temp }}/gomodcache
         run: |
           # In the build image, the repo and each sibling are mounted under /go/src, where its go.mod `replace` paths resolve.
           goreleaser_run() {
             if [ -z "$BUILD_IMAGE" ]; then goreleaser "$@"; return; fi
             name="${GITHUB_REPOSITORY#*/}"
-            mounts=(-v "$PWD:/go/src/$name")
+            # The modules the download step fetched, where the image's Go reads its own cache.
+            mounts=(-v "$PWD:/go/src/$name" -v "$GOMODCACHE:/go/pkg/mod")
             IFS=',' read -ra listed <<< "$SIBLINGS"
             for item in "${listed[@]}"; do
               item="${item//[[:space:]]/}"
@@ -249,7 +296,7 @@ jobs:
               repo="${item%%@*}"
               mounts+=(-v "$(cd .. && pwd)/${repo#*/}:/go/src/${repo#*/}")
             done
-            docker run --rm ${PLATFORM:+--platform="$PLATFORM"} -e CGO_ENABLED=1 -e GORELEASER_CURRENT_TAG "${mounts[@]}" -w "/go/src/$name" "$BUILD_IMAGE" "$@"
+            docker run --rm ${PLATFORM:+--platform="$PLATFORM"} -e CGO_ENABLED=1 -e GORELEASER_CURRENT_TAG -e GOMODCACHE=/go/pkg/mod "${mounts[@]}" -w "/go/src/$name" "$BUILD_IMAGE" "$@"
           }
           goreleaser_run release --clean --skip=publish,announce,validate --config "$CONFIG"
 

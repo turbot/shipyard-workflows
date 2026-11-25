@@ -1,20 +1,21 @@
-# The build of a Go CLI's prerelease (docs/release-prerelease.md): between the start and the publish steps of prerelease.yml, which
-# workflows/router.yml runs for a `prerelease` dispatch, it builds the named commit with goreleaser, the version set from the tag
-# the start step named and publishing skipped, and uploads every file `checksums.txt` lists (the archives, and the Linux packages
-# when the repo makes them) and `checksums.txt` as the artifact the publish step attaches to the prerelease. Nothing is published
-# here.
+# The build of a Go CLI's prerelease (docs/release-prerelease.md). It runs on the work branch, never under `main`: the router's
+# `prerelease-build` job, which runs on `main` and runs none of the commit's code, starts the router's `prerelease-files` flow on the
+# work branch, and this workflow is that flow's job. It builds the tip of the work branch, which is the commit it is run at, with
+# goreleaser, the version set from the tag the prerelease's start step named and publishing skipped, and uploads every file
+# `checksums.txt` lists (the archives, and the Linux packages when the repo makes them) and `checksums.txt` as the artifact the
+# prerelease's publish step takes by this run's id. Nothing is published here.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to
 # .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
 # `v<major>` (`v0`), the tag each release moves to its own commit.
 #
-# It builds what go-cli-ship.yml builds at a merge (the steps from "Set up Go" on are the same text bar their `if:`, their comments and the title of an error, which a test keeps so), but
-# not in that workflow: a prerelease builds a work branch's commit, which nobody may have approved, on `main`. So this job holds
-# `contents: read` and nothing else: no `id-token` (a step of the repo's code could otherwise ask for an OIDC token in `main`'s
-# name), no secret, no environment, no cache and no shipyard checkout, since nothing of shipyard's runs in it. The release
-# key is read only by the publish job, in the `release` environment. The start step has already checked who started the run, the
-# branch and the commit, and named the tag; this job takes both as inputs and checks their shape. Nothing a caller passes is put
-# into a shell line: each input reaches a step as an environment variable and is checked there.
+# It builds what go-cli-ship.yml builds at a merge (the steps from "Set up Go" on are the same text bar their `if:`, their comments and the title of an error, which a test keeps so). The
+# work branch's code runs here, with the work branch's ref: it holds no secret and cannot reach the release key, and its cache is the work
+# branch's own, so nothing it saves is restored in a run on `main`. The job holds `contents: read` and nothing else: no `id-token`, no
+# secret, no environment, no cache and no shipyard checkout, since nothing of shipyard's runs in it. `commit` is the run's own commit
+# (`github.sha`), which the first step checks: the publish step reads the run's commit from GitHub and publishes this run's files for
+# that commit alone. Nothing a caller passes is put into a shell line: each input reaches a step as an environment variable and is
+# checked there.
 
 name: Go CLI prerelease build
 
@@ -22,11 +23,11 @@ on:
   workflow_call:
     inputs:
       commit:
-        description: The full 40-character commit to build, the same the prerelease's start and publish steps check.
+        description: The full 40-character commit to build. It must be the commit this run is at (github.sha), the tip of the work branch it was started on.
         type: string
         required: true
       tag:
-        description: The prerelease's tag (v1.5.0-rc.1), as the start step of prerelease.yml named it (needs.<start job>.outputs.tag). Its version is the build's.
+        description: The prerelease's tag (v1.5.0-rc.1), as the start step of prerelease.yml named it. Its version is the build's.
         type: string
         required: true
       tag-prefix:
@@ -66,7 +67,7 @@ on:
         type: string
         default: ''
       artifact:
-        description: The name of the artifact the files are uploaded as. The publish step's `assets` input names the same.
+        description: 'The name of the artifact the files are uploaded as, <assets>-<tag> (release-assets-v1.5.0-rc.1): the prerelease''s build and publish steps look for that name, so a build made for another tag is never taken for this one.'
         type: string
         default: release-assets
     outputs:
@@ -104,6 +105,7 @@ jobs:
         run: |
           fail() { echo "::error title=Go CLI prerelease build::$1"; exit 2; }
           [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail 'commit is a full 40-character commit id'
+          [ "$COMMIT" = "$GITHUB_SHA" ] || fail "commit must be the commit this run is at ($GITHUB_SHA): a prerelease is built from the tip of the work branch it was started on"
           [[ "$TAG_PREFIX" =~ ^[A-Za-z0-9._-]*$ ]] || fail 'tag-prefix may hold only letters, digits, dot, underscore and hyphen'
           [[ "$PRERELEASE_TAG" == "$TAG_PREFIX"* && "${PRERELEASE_TAG#"$TAG_PREFIX"}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(alpha|beta|rc)\.[1-9][0-9]*$ ]] \
             || fail 'tag is a prerelease tag: the tag prefix, X.Y.Z, then -alpha, -beta or -rc and a number, such as v1.5.0-rc.1'
@@ -175,12 +177,56 @@ jobs:
               || { echo "::error title=Go CLI prerelease build::the sibling $item could not be cloned with no credential: it must be a public repo, and its branch or tag must exist (build.siblings in .github/shipyard.yml, or the siblings input)"; exit 1; }
           done
 
+      # Every module the build needs is downloaded first, with a few tries: one error from the Go module proxy must not fail a release
+      # whose own CI passed, not in the tests, the make target, goreleaser's own hooks (`go mod tidy`) nor the build. What runs after reads
+      # this cache (GOMODCACHE, a folder of this run's own, which a build container mounts too). The same step, word for word, is in
+      # go-cli-results.yml, go-cli-ship.yml and go-cli-prerelease-build.yml (a test keeps it so). A download that fails on every try
+      # fails the step, and its error names the module and what the proxy said.
+      - name: Download the Go modules
+        shell: bash
+        working-directory: caller
+        env:
+          SIBLINGS: ${{ inputs.siblings }}
+          GOMODCACHE: ${{ runner.temp }}/gomodcache
+        run: |
+          tries="${MODULE_TRIES:-4}"
+          pause="${MODULE_WAIT:-5}"
+          mkdir -p "$GOMODCACHE"
+          # The repo, then each sibling its go.mod replaces: each is a module of its own.
+          dirs=(.)
+          IFS=',' read -ra listed <<< "$SIBLINGS"
+          for item in "${listed[@]}"; do
+            item="${item//[[:space:]]/}"
+            [ -n "$item" ] || continue
+            repo="${item%%@*}"
+            dirs+=("../${repo#*/}")
+          done
+          errs="$RUNNER_TEMP/go-mod-download.err"
+          for dir in "${dirs[@]}"; do
+            [ -f "$dir/go.mod" ] || continue
+            n=1
+            until (cd "$dir" && go mod download 2>"$errs"); do
+              cat "$errs"
+              if [ "$n" -ge "$tries" ]; then
+                # One line, with no `%` left to be read as an escape: the proxy's own words name the module and the error.
+                detail="$(tr '\r\n' '  ' < "$errs" | cut -c1-400 | sed 's/[[:space:]]*$//')"
+                where="${dir#../}"; [ "$where" != . ] || where="the repo"
+                echo "::error title=Go CLI prerelease build::the Go modules of $where could not be downloaded after $n tries: ${detail//%/%25}"
+                exit 1
+              fi
+              echo "go mod download in $dir failed (try $n of $tries): trying again in $((pause * n))s"
+              sleep "$((pause * n))"
+              n=$((n + 1))
+            done
+          done
+
       - name: Run the repo's make target
         if: ${{ inputs.make-target != '' }}
         shell: bash
         working-directory: caller
         env:
           MAKE_TARGET: ${{ inputs.make-target }}
+          GOMODCACHE: ${{ runner.temp }}/gomodcache
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
         run: make "$MAKE_TARGET"
@@ -196,12 +242,14 @@ jobs:
           BUILD_IMAGE: ${{ inputs.build-image }}
           SIBLINGS: ${{ inputs.siblings }}
           PLATFORM: ${{ inputs.platform }}
+          GOMODCACHE: ${{ runner.temp }}/gomodcache
         run: |
           # In the build image, the repo and each sibling are mounted under /go/src, where its go.mod `replace` paths resolve.
           goreleaser_run() {
             if [ -z "$BUILD_IMAGE" ]; then goreleaser "$@"; return; fi
             name="${GITHUB_REPOSITORY#*/}"
-            mounts=(-v "$PWD:/go/src/$name")
+            # The modules the download step fetched, where the image's Go reads its own cache.
+            mounts=(-v "$PWD:/go/src/$name" -v "$GOMODCACHE:/go/pkg/mod")
             IFS=',' read -ra listed <<< "$SIBLINGS"
             for item in "${listed[@]}"; do
               item="${item//[[:space:]]/}"
@@ -209,7 +257,7 @@ jobs:
               repo="${item%%@*}"
               mounts+=(-v "$(cd .. && pwd)/${repo#*/}:/go/src/${repo#*/}")
             done
-            docker run --rm ${PLATFORM:+--platform="$PLATFORM"} -e CGO_ENABLED=1 -e GORELEASER_CURRENT_TAG "${mounts[@]}" -w "/go/src/$name" "$BUILD_IMAGE" "$@"
+            docker run --rm ${PLATFORM:+--platform="$PLATFORM"} -e CGO_ENABLED=1 -e GORELEASER_CURRENT_TAG -e GOMODCACHE=/go/pkg/mod "${mounts[@]}" -w "/go/src/$name" "$BUILD_IMAGE" "$@"
           }
           goreleaser_run release --clean --skip=publish,announce,validate --config "$CONFIG"
 

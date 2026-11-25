@@ -6,7 +6,9 @@
 #   dispatch `prep`                     prep (prep.yml), then cut (cut.yml), on the default branch
 #   PR into a release branch            the candidate by kind, then the record; the release check (release-check.yml) only
 #                                       when the run builds no candidate (the check job says why)
-#   review of such a PR, dispatch `record`   the record (record.yml); a review reads the run the record already names
+#   review of such a PR                 the release check, which re-judges the approval, then the record (record.yml), which reads
+#                                       the run the record already names
+#   dispatch `record`                   the record
 #   dispatch `check`                    the release check
 #   dispatch `gate`                     the release gate (release-gate.yml), on `main`
 #   dispatch `ask`                      the Slack ask (ask.yml), on the default branch
@@ -15,8 +17,10 @@
 #                                       announcement (announce.yml) and the repo's `afterShip` workflows
 #   dispatch `shipped`                  the tag (tag.yml) for a `/shipped` comment, on the release PR's base branch, then the announcement
 #   dispatch `reship`                   the cut of a re-ship (cut.yml), on the default branch
-#   dispatch `prerelease`               a prerelease's start (prerelease.yml), the build of its files by kind (a go-cli's,
-#                                       go-cli-prerelease-build.yml), then its publish, on `main` or `main-<x.y>`
+#   dispatch `prerelease`               a prerelease's start (prerelease.yml), the start of its build on the work branch and the wait for
+#                                       it (prerelease-build.yml), then its publish, on `main` or `main-<x.y>`
+#   dispatch `prerelease-files`         the build of a prerelease's files by kind (a go-cli's, go-cli-prerelease-build.yml), on the
+#                                       work branch: the dispatch the `prerelease` run above makes, never on `main`
 #   dispatch `announce`                 the announcement (announce.yml) of the tag `args.tag` names, on the default branch
 #
 # The ask after a record is not run here: the record starts it, once it writes SHIP, by dispatching `shipyard-release.yml` with
@@ -42,11 +46,12 @@
 # A Go CLI built with cgo ships and tags like any other, in the build image its `build.image` names. A `shipped` dispatch is
 # the `/shipped` comment's second run, and may name the artifact of a run the repo's own ship uploaded (`args.assets` and
 # `args.assets-run-id`, which become the tag job's `assets` and `assets-run-id`); a tag it makes is announced by the announce job,
-# which reads the `shipped` job's tag as it reads the tag job's. A prerelease's files are built between its start and its publish: a
-# Go CLI's by go-cli-prerelease-build.yml, given the commit and the tag the start named, in the build image, on the runner and
-# platform, with the siblings its `build` settings name (the ship's own build steps, in a job with a read-only token, no `id-token`,
-# no key, no environment and no cache, since it runs a work branch's code on `main`), and the publish attaches them. A kind with no
-# files has no build job and a publish with none.
+# which reads the `shipped` job's tag as it reads the tag job's. A prerelease's files are built on the work branch, never under
+# `main`: the `prerelease` run, which holds the release key, runs none of the commit's code. Its `prerelease-build` job (prerelease-build.yml,
+# with no key) dispatches this file's `prerelease-files` action on the work branch and waits for that run, and its publish takes the run's files by the run's id. The
+# `prerelease-files` run builds the branch's tip, a Go CLI's with go-cli-prerelease-build.yml, in the build image, on the runner and platform,
+# with the siblings its `build` settings name (the ship's own build steps), in a job with a read-only token, no `id-token`, no key, no
+# environment and no secret. A kind with no files has no build job and a publish with none.
 #
 # Source of truth is this file in turbot/shipyard (workflows/). It is published to .github/workflows/ in
 # turbot/shipyard-workflows, and the fixed file calls that copy at `v0`, the tag each Shipyard release moves to its own commit.
@@ -90,7 +95,7 @@ on:
         description: The Slack app's bot token, the org secret of that name (docs/release-ask.md). The ask and the announcement read it.
         required: false
       SHIPYARD_ORG_TOKEN:
-        description: A token that can read the approver team's members (docs/release-check.md, docs/release-prerelease.md). The release check and a prerelease read it.
+        description: A token that can read the approver team's members (docs/release-check.md, docs/release-prerelease.md). The release check reads it; a prerelease does not (it makes its own from the release App key).
         required: false
       WEB_BUILDS_APP_PRIVATE_KEY:
         description: The web builds App key, for a docs site's preview and publish (docs/release-apps.md). No flow of this file reads it yet.
@@ -148,6 +153,7 @@ jobs:
       pre-version: ${{ steps.route.outputs.pre-version }}
       pre-kind: ${{ steps.route.outputs.pre-kind }}
       pre-build: ${{ steps.route.outputs.pre-build }}
+      pre-tag: ${{ steps.route.outputs.pre-tag }}
     steps:
       # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
       # workflow, which is the commit of shipyard to run.
@@ -331,12 +337,43 @@ jobs:
       ref: ${{ needs.route.outputs.head }}
       consumer: ${{ needs.route.outputs.consumer }}
 
+  # Never in a run that builds the candidate: the record names that run as its results, and a review's record uses it only when
+  # it ended with success (lib/release-run.js). A release PR does not pass the check until it is approved (rule 9), so a check here could
+  # end the run with failure and every review's record would say HOLD. A release PR the run builds is checked by the repo's own
+  # `release-check.yml` caller (docs/release-check.md), which runs on each push, review and comment; this job checks the rest: a
+  # `check` dispatch, a PR whose run builds nothing (a repo that owns `record`, a kind with no candidate build, another head) and
+  # a review. A review builds no candidate, so its check runs, and it is the check that judges the approval: the record below
+  # needs this job, so it reads `release-check` after the approval has been counted, never the status the PR had before it.
+  check:
+    name: release-check
+    needs: [route, candidate-go-cli, candidate-go-library]
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'check')
+      && needs.candidate-go-cli.result == 'skipped'
+      && needs.candidate-go-library.result == 'skipped'
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      statuses: write       # the release-check status on the PR's head
+      id-token: write
+    uses: ./.github/workflows/release-check.yml
+    with:
+      approvers: ${{ needs.route.outputs.approvers }}
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+    secrets:
+      org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
+
   record:
     name: record
-    needs: [route, candidate-go-cli, candidate-go-library]
+    needs: [route, candidate-go-cli, candidate-go-library, check]
     # After the candidate, or alone on a review (the candidate is skipped then, and a skipped job would skip this one without
     # `!cancelled()`). A candidate that failed to run stops the record, and a repo Shipyard has no candidate build for runs no
-    # record (the route job's warning says why: `record-note`).
+    # record (the route job's warning says why: `record-note`). After the check too: on a review the check re-judges the PR once
+    # the approval is in, and the record counts its status. A check that failed (a rule is still open) or was skipped does not stop
+    # the record: its status is what the record reads, and a failing one says HOLD.
     if: >-
       !cancelled()
       && needs.route.result == 'success'
@@ -366,33 +403,8 @@ jobs:
       # The record starts the ask (on the default branch) and the gate (on main) through this same fixed file.
       ask-workflow: shipyard-release.yml
       gate-workflow: shipyard-release.yml
-
-  # Never in a run that builds the candidate: the record names that run as its results, and a review's record uses it only when
-  # it ended with success (lib/release-run.js). A release PR fails the check until it is approved (rule 9), so a check here would
-  # end the run with failure and every review's record would say HOLD. A release PR the run builds is checked by the repo's own
-  # `release-check.yml` caller (docs/release-check.md), which runs on each push, review and comment; this job checks the rest: a
-  # `check` dispatch, and a PR whose run builds nothing (a repo that owns `record`, a kind with no candidate build, another head).
-  check:
-    name: release-check
-    needs: [route, candidate-go-cli, candidate-go-library]
-    if: >-
-      !cancelled()
-      && needs.route.result == 'success'
-      && contains(fromJSON(needs.route.outputs.flows), 'check')
-      && needs.candidate-go-cli.result == 'skipped'
-      && needs.candidate-go-library.result == 'skipped'
-    permissions:
-      contents: read
-      pull-requests: read
-      issues: read
-      statuses: write       # the release-check status on the PR's head
-      id-token: write
-    uses: ./.github/workflows/release-check.yml
-    with:
-      approvers: ${{ needs.route.outputs.approvers }}
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
-    secrets:
-      org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
+      # The same as the gate's, so the two count alike (docs/release-gate.md): a record's own check is never judged.
+      ignore-checks: record / record
 
   # Enters the `slack` environment, which allows the default branch only.
   ask:
@@ -437,6 +449,9 @@ jobs:
     with:
       pr: ${{ needs.route.outputs.pr }}
       ask-workflow: shipyard-release.yml
+      # A repo that owns `record` runs it in a file of its own, and its check run, `record / record`, is still running when its
+      # record starts this gate. The record's own check is never judged, as the gate of a repo's own file has always said.
+      ignore-checks: record / record
     secrets:
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
@@ -722,9 +737,9 @@ jobs:
       fixes: ${{ needs.route.outputs.fixes }}
 
   # A prerelease, started on `main` or `main-<x.y>` (the release environment allows nothing else) by a person in the area's
-  # approver team, which the command checks with `SHIPYARD_ORG_TOKEN`. Both calls enter the `release` environment as far as
-  # GitHub's checks go (the workflow holds its publish job in both), so both carry the allow-list. Both grant what the workflow's
-  # publish job asks for, though the start step reads no PR.
+  # approver team, which the command checks with a token each job makes from the release App key. Both calls enter the `release` environment
+  # (the workflow's start job and its publish job each run in it), so both carry the allow-list. Both grant what the workflow's
+  # publish job asks for (pull-requests, and actions: read for the build run), though the start step uses none of it.
   prerelease-start:
     name: prerelease-start
     needs: route
@@ -735,6 +750,7 @@ jobs:
       && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
       && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
     permissions:
+      actions: read         # not used by this step: the workflow's publish job asks for it, and GitHub checks that job here too
       contents: read
       pull-requests: read
       id-token: write
@@ -748,15 +764,14 @@ jobs:
       approvers: ${{ needs.route.outputs.approvers }}
       product: ${{ needs.route.outputs.product }}
     secrets:
-      org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
-      # The workflow's publish job reads it; this call runs its start step only, and GitHub checks the secrets of every job.
+      # Both of the workflow's jobs read it: the start step to read the approver team, the publish step to make the tag.
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
-  # The files of a Go CLI's prerelease: the commit built with the tag the start step named as its version. It runs the repo's make
-  # target and goreleaser file at a work branch's commit, which nobody may have approved, on `main`. So it holds `contents: read`
-  # alone: no `id-token` (the code could ask for an OIDC token in `main`'s name), no secret, no environment and no cache, and the
-  # files are data the publish job attaches, never runs. It runs only after a start that passed, which checked who started the run,
-  # the branch and the commit. A kind with no files has no build (`pre-build`).
+  # The start of a prerelease's build, for a kind that has files: it dispatches the build on the work branch, at the branch's tip,
+  # and waits for its run (the `prerelease-files` job below, in another run), which names the tag the start named. This job runs
+  # none of the commit's code: it holds no key, names no environment and checks out nothing of the repo's, so nothing the commit
+  # holds reaches `main`'s cache or the key. It runs only after a start that passed, which checked who started the run, the branch and
+  # the commit. A kind with no files has no build (`pre-build`).
   prerelease-build:
     name: prerelease-build
     needs: [route, prerelease-start]
@@ -764,22 +779,53 @@ jobs:
       needs.route.result == 'success'
       && needs.prerelease-start.result == 'success'
       && contains(fromJSON(needs.route.outputs.flows), 'prerelease')
-      && needs.route.outputs.pre-build == 'go-cli'
+      && needs.route.outputs.pre-build != ''
       && github.event_name == 'workflow_dispatch'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
+      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+    permissions:
+      actions: write        # start the build on the work branch and read its run
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/prerelease-build.yml
+    with:
+      commit: ${{ needs.route.outputs.commit }}
+      branch: ${{ needs.route.outputs.pre-branch }}
+      version: ${{ needs.route.outputs.pre-version }}
+      pre: ${{ needs.route.outputs.pre-kind }}
+      tag: ${{ needs.prerelease-start.outputs.tag }}
+      assets: ${{ needs.route.outputs.assets }}
+      workflow: shipyard-release.yml
+      action: prerelease-files
+
+  # The files of a Go CLI's prerelease: the tip of the work branch built with the tag the start step named as its version. This is
+  # the run the `prerelease-build` job above starts on the work branch, with the action `prerelease-files`; it runs the repo's make
+  # target and goreleaser file at the branch's tip with the work branch's ref, so it holds `contents: read` alone: no `id-token`, no
+  # secret, no environment and no cache, and the files are data the prerelease's publish attaches, never runs. It never runs on `main`.
+  prerelease-files:
+    name: prerelease-files
+    needs: route
+    if: >-
+      needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'prerelease-files')
+      && needs.route.outputs.pre-build == 'go-cli'
+      && github.event_name == 'workflow_dispatch'
+      && !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
       && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
       && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
     permissions:
       contents: read
     uses: ./.github/workflows/go-cli-prerelease-build.yml
     with:
-      commit: ${{ needs.route.outputs.commit }}
-      tag: ${{ needs.prerelease-start.outputs.tag }}
+      commit: ${{ github.sha }}
+      tag: ${{ needs.route.outputs.pre-tag }}
       make-target: ${{ needs.route.outputs.make-target }}
       build-image: ${{ needs.route.outputs.build-image }}
       runner: ${{ needs.route.outputs.runner }}
       platform: ${{ needs.route.outputs.platform }}
       siblings: ${{ needs.route.outputs.siblings }}
+      artifact: ${{ format('{0}-{1}', needs.route.outputs.assets, needs.route.outputs.pre-tag) }}   # <assets>-<tag>, the name the prerelease's build and publish steps look for
 
   # After the start and, for a kind that has files, after their build: a build that failed or was skipped publishes nothing, so no
   # empty prerelease is made. A kind with no build has its build job skipped, which `!cancelled()` lets this job run after.
@@ -797,6 +843,7 @@ jobs:
       && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
       && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
     permissions:
+      actions: read         # the build run and its files, which another run of this repo made
       contents: read
       pull-requests: read   # the PRs' Changelog lines, for the Release's body
       id-token: write
@@ -811,6 +858,7 @@ jobs:
       tag: ${{ needs.prerelease-start.outputs.tag }}
       product: ${{ needs.route.outputs.product }}
       assets: ${{ needs.route.outputs.assets }}
+      build-workflow: shipyard-release.yml
+      build-run: ${{ needs.prerelease-build.outputs.run }}
     secrets:
-      org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

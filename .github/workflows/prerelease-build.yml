@@ -1,0 +1,139 @@
+# The build of a prerelease, started from `main` and run on the work branch (docs/release-prerelease.md). Between the start and the
+# publish steps of prerelease.yml, this workflow starts the repo's own build workflow on the work branch, at the branch's tip, with the
+# tag the start step named, waits for that run, and outputs its id, which the publish step takes the files of (`build-run`).
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to
+# .github/workflows/ in turbot/shipyard-workflows, and every repo calls that copy at
+# `v<major>` (`v0`), the tag each release moves to its own commit.
+#
+# It runs none of the commit's code and holds nothing worth taking: no environment, no secret, no checkout of the repo's, and a
+# token with `contents: read` and `actions: write` alone, to start the build and read its run. A prerelease's build is the work branch's
+# code, which nobody may have approved, so it runs on the work branch with the work branch's ref, where the release key and `main`'s
+# cache are out of its reach, never in a run on `main`. The caller calls this workflow only after a start that passed, which checked who
+# started the run, the branch and the commit; the publish step checks all of it again, and that the run is this commit's build.
+# Inputs reach the command as environment, never as shell text.
+
+name: Prerelease build
+
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: The full 40-character commit to make the prerelease of. It must be the tip of branch, which the build runs at.
+        type: string
+        required: true
+      branch:
+        description: The work branch the commit is the tip of (develop, develop-<x.y>), or the candidate (release/X.Y.Z). Never a PR's branch.
+        type: string
+        default: develop
+      version:
+        description: The version still to come, X.Y.Z, as the start step checked it.
+        type: string
+        required: true
+      pre:
+        description: 'The kind: alpha, beta or rc.'
+        type: string
+        required: true
+      tag-prefix:
+        description: The prefix of the repo's release tags.
+        type: string
+        default: v
+      tag:
+        description: The tag the start step named (needs.<start job>.outputs.tag), which the build is made for.
+        type: string
+        required: true
+      assets:
+        description: The name the build workflow uploads its artifact under, without the tag. The artifact is `<assets>-<tag>` (prerelease-assets-v1.5.0-rc.1), so a build made for another tag is never taken for this one, and the run must end with it. The publish step attaches its files to the Release.
+        type: string
+        required: true
+      workflow:
+        description: The file name of the repo's build workflow (prerelease-files.yml), which must be on the work branch and take workflow_dispatch with the input `tag` (docs/release-prerelease.md).
+        type: string
+        required: true
+      action:
+        description: For a repo whose build is run by the release file (shipyard-release.yml), the action to start it with. Left empty, the build workflow is started with the input `tag`.
+        type: string
+        default: ''
+    outputs:
+      run:
+        description: The id of the build's run, which the publish step takes the files of (build-run).
+        value: ${{ jobs.build.outputs.run }}
+
+permissions: {}
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: write        # start the build workflow on the work branch, and read its run and artifacts
+      contents: read        # the branch's tip
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    outputs:
+      run: ${{ steps.build.outputs.run }}
+    steps:
+      - name: Check the run is on main
+        shell: bash
+        run: |
+          if ! [[ "$GITHUB_REF" =~ ^refs/heads/main(-(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?)?$ ]]; then
+            echo "::error title=Prerelease::the build is started from main or main-<x.y>, as the start and the publish run: start the prerelease workflow on main. Nothing was built"
+            exit 1
+          fi
+
+      - name: Find this workflow's commit
+        # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+        # workflow, which is the commit of shipyard to run.
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/prerelease-build.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows prerelease-build.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Prerelease::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # Inputs reach the command as environment, never as shell text.
+      - name: Start the build on the work branch and wait for it
+        id: build
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          COMMIT: ${{ inputs.commit }}
+          BRANCH: ${{ inputs.branch }}
+          VERSION: ${{ inputs.version }}
+          PRE: ${{ inputs.pre }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          TAG: ${{ inputs.tag }}
+          ASSETS: ${{ inputs.assets }}
+          BUILD_WORKFLOW: ${{ inputs.workflow }}
+          BUILD_ACTION: ${{ inputs.action }}
+        run: |
+          args=(--step build --commit "$COMMIT" --branch "$BRANCH" --version "$VERSION" --pre "$PRE" --tag-prefix "$TAG_PREFIX" --tag "$TAG" "--assets=$ASSETS" "--build-workflow=$BUILD_WORKFLOW")
+          [ -n "$BUILD_ACTION" ] && args+=("--build-action=$BUILD_ACTION")
+          node shipyard/bin/shipyard prerelease "${args[@]}"

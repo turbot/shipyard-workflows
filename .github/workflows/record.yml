@@ -771,6 +771,69 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
+      # `release-check` does not pass a release PR until a person approves it (rule 9), and only a run of the check after the approval
+      # says otherwise. The record counts that status, so a review that reads it before that run has finished writes HOLD for an
+      # approved release, and the gate, which the record starts, never says SHIP. The router's own check runs before this job
+      # (workflows/router.yml), but a repo that owns its record runs this job beside the router's check, and a repo's own check
+      # workflow runs beside it too: so the record waits here, bounded, for the check's answer to the approval. The newest
+      # approval of the head is read from the PR's reviews, never from the event: the caller passes what it wants as inputs.
+      # An answer is a `success` set after the approval, or a status set after it by a run that started after it: a run
+      # that read the reviews before the approval can still write its failure after it (the runs of one PR queue, so the run
+      # for the approval waits behind it), and that failure answers nothing. With no approval of this head there is nothing
+      # the check can turn green, and with no such status on the head there is no check to wait for (a repo that has none):
+      # neither waits. A check that does not answer in time is named, and the record goes on with the status it has: a review
+      # run again once the check has run reads the new one.
+      - name: Wait for the release check after an approval
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          fail() { echo "::error title=Record::$1"; exit 1; }
+          head=$(git -C caller rev-parse HEAD)
+          approvals=$(HEAD_SHA="$head" gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews?per_page=100" \
+            --jq '.[] | select(.state == "APPROVED" and .commit_id == $ENV.HEAD_SHA) | .submitted_at') \
+            || fail "could not read the reviews of #$PR"
+          approved=$(printf '%s\n' "$approvals" | sed '/^$/d' | LC_ALL=C sort | tail -n 1)
+          if [[ -z "$approved" ]]; then
+            echo "No approval of ${head:0:7}: the release check has nothing new to judge."
+            exit 0
+          fi
+          deadline=$((SECONDS + ${CHECK_WAIT_SECONDS:-300}))
+          while :; do
+            # Each read on its own: a GitHub error stops the job, never "no status".
+            statuses=$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$head/statuses?per_page=100" \
+              --jq '.[] | select(.context == "release-check") | [.created_at, .state, (.target_url // "")] | @tsv') \
+              || fail "could not read the commit statuses of ${head:0:7}"
+            newest=$(printf '%s\n' "$statuses" | sed '/^$/d' | LC_ALL=C sort | tail -n 1)
+            if [[ -z "$newest" ]]; then
+              echo "No release-check status on ${head:0:7}: nothing to wait for."
+              exit 0
+            fi
+            IFS=$'\t' read -r set_at state url <<< "$newest"
+            if [[ "$set_at" > "$approved" ]]; then
+              if [[ "$state" == success ]]; then
+                echo "release-check passed at $set_at, after the approval at $approved."
+                exit 0
+              fi
+              # Not a pass: it answers the approval only when its run started after it.
+              if [[ "$url" =~ ^https://[^/]+/[^/]+/[^/]+/actions/runs/([0-9]+) ]]; then
+                started=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/${BASH_REMATCH[1]}" --jq '.run_started_at // .created_at') \
+                  || fail "could not read the run ${BASH_REMATCH[1]} that set release-check"
+              else
+                started=$set_at
+              fi
+              if [[ "$started" > "$approved" ]]; then
+                echo "release-check is $state at $set_at, from a run that started after the approval at $approved."
+                exit 0
+              fi
+            fi
+            if (( SECONDS >= deadline )); then
+              echo "::warning title=Record::the newest release-check status on ${head:0:7} ($state, $set_at) does not answer the approval at $approved, and no newer one came. The record counts it as it is: run this again once the release check has run"
+              exit 0
+            fi
+            sleep 5
+          done
+
       # The release run the record on the page names (`<!-- shipyard:release-run <id> -->`), or none.
       # Whether it is this release's is checked when the record reads it, below.
       - name: Find the release run the record names

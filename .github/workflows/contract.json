@@ -240,6 +240,24 @@
         "prep": {}
       }
     },
+    "prerelease-build.yml": {
+      "inputs": [
+        "assets",
+        "commit",
+        "pre",
+        "tag",
+        "version",
+        "workflow"
+      ],
+      "secrets": [],
+      "jobs": {
+        "build": {
+          "actions": "write",
+          "contents": "read",
+          "id-token": "write"
+        }
+      }
+    },
     "prerelease.yml": {
       "inputs": [
         "approvers",
@@ -248,11 +266,10 @@
         "step",
         "version"
       ],
-      "secrets": [
-        "org-token"
-      ],
+      "secrets": [],
       "jobs": {
         "publish": {
+          "actions": "read",
           "contents": "read",
           "id-token": "write",
           "pull-requests": "read"
@@ -414,14 +431,21 @@
         },
         "prep": {},
         "prerelease-build": {
+          "actions": "write",
+          "contents": "read",
+          "id-token": "write"
+        },
+        "prerelease-files": {
           "contents": "read"
         },
         "prerelease-publish": {
+          "actions": "read",
           "contents": "read",
           "id-token": "write",
           "pull-requests": "read"
         },
         "prerelease-start": {
+          "actions": "read",
           "contents": "read",
           "id-token": "write",
           "pull-requests": "read"
