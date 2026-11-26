@@ -96,7 +96,7 @@
       }
     },
     "notes": {
-      "description": "The release notes, for users: public text with no internal term, private link or file path. They show the title, the summary, then the items: under their labels, in the order of the six, unless every item has the same kind and it is neither Before you upgrade nor Security, when the bullets show alone. The reference block, when there is one, comes last.",
+      "description": "The release notes, for users: public text with no internal term, private link or path into the product's source. A file a user edits (`pg_hba.conf`) may be named. They show the title, the summary, then the items: under their labels, in the order of the six, unless every item has the same kind and it is neither Before you upgrade nor Security, when the bullets show alone. The reference block, when there is one, comes last.",
       "type": "object",
       "required": [
         "title",

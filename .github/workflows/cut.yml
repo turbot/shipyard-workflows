@@ -257,7 +257,7 @@ jobs:
           # A patch's facts list its fixes, the merge commits of the working branch this run started on.
           patch=()
           if [[ "$PATCH" = true ]]; then patch=(--fixes "$FIXES" --work-branch "$GITHUB_REF_NAME"); fi
-          node shipyard/bin/shipyard facts --repo "$GITHUB_REPOSITORY" --to "$COMMIT" --tag-prefix "$TAG_PREFIX" --dir caller --out "$RUNNER_TEMP/release/facts.json" "${patch[@]}"
+          node shipyard/bin/shipyard facts --repo "$GITHUB_REPOSITORY" --to "$COMMIT" --tag-prefix "$TAG_PREFIX" --base "$BASE" --dir caller --out "$RUNNER_TEMP/release/facts.json" "${patch[@]}"
 
       # Refuses a prep file made for another range, and one that fails the lint: the job stops here.
       - name: Check the prep file against the facts

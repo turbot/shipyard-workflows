@@ -39,7 +39,7 @@ All text fields hold at least one character that is not a space. No field outsid
 
 ## Writing the release notes
 
-The notes lead with what a user gains, and stay factual. Positive means order and emphasis, not euphemism: the title, the summary and the first items lead with the best real gain, and a removal is still called a removal. Make no claim the diff cannot back, and use no hype words (`hype-word`). The examples are Powerpipe v1.7.0, whose best news is that its server reloads when mods change, and which deprecated two run flags. An item is shown as its name, a colon, then its text.
+The notes lead with what a user gains, and stay factual. Positive means order and emphasis, not euphemism: the title, the summary and the first items lead with the best real gain, and a removal is still called a removal. Make no claim the diff cannot back, and use no hype words (`hype-word`). The examples are Powerpipe v1.7.0, whose best news is that its server reloads when mods change, and which deprecated two run flags. The three rules at the end of the guide on code, on what a user notices and on security items use Steampipe v2.5.3, Tailpipe v0.9.0 and Powerpipe v1.9.0. An item is shown as its name, a colon, then its text.
 
 ### The title
 
@@ -57,24 +57,77 @@ One sentence in the same voice as the title: the best gain first, then the rest.
 
 ### An item's first sentence
 
-It says what the reader gains, in the second person (you, your), with a concrete case. The #releases post shows only that sentence. The mechanism comes after. It never leads with what no longer happens (`item-gain-first`).
+It says what the user gains, with a concrete case, in whatever voice reads best: it need not use the word "you". The #releases post shows only that sentence. The mechanism comes after. It never leads with what no longer happens (`item-gain-first`).
 
-- Good: `Live mod reloads: Install, update or uninstall a mod and your running server picks it up, with no restart. It watches the mods in its workspace folder.`
-- Not good: `Live mod reloads: The server reloads when mods are installed, updated or uninstalled in its workspace folder.` (it says what the code does, not what the reader gains)
+- Good: `Failed saves show as failed: A connection whose state could not be saved now shows as failed, with an error that names it. Before, it showed as up to date.`
+- Not good: `Failed state saves: You see a connection as failed, with an error naming it, when Steampipe cannot save its state, in place of seeing it as up to date.` (a forced "you" turns a plain fix into a sentence a reader has to read twice)
 
 ### A removal or deprecation
 
 It is called what it is ("deprecated", "removed"), in its own item of kind `What's new`, with a one-clause reason when that helps and the replacement named. It is never dressed up as a feature, and never the headline. When its PR has an `Update-Needs:` line, the action is a second item, under `Before you upgrade`.
 
-- Good: `Deprecated run flags: --mod-install and --pull on benchmark, control, dashboard and detection runs are deprecated, and ignored with a warning. They never worked reliably: a missing mod failed before the install could help, and --pull updated mods one run late. Use powerpipe mod install or powerpipe mod update instead.`
+- Good: ``Deprecated run flags: `--mod-install` and `--pull` on the run commands are deprecated, and ignored with a warning. They never worked reliably: a missing mod failed before the install could help, and `--pull` updated mods one run late. Use `powerpipe mod install` or `powerpipe mod update` instead.``
 - Not good: `Safer mod locks: Your runs now leave the mod lock file alone.` (a deprecation dressed up as a feature: it never says the flags are deprecated, or what to use instead)
 
 ### Before you upgrade
 
-It stays factual and short, starts with its condition (`step-condition`), and says why the new way is better.
+It stays factual and short, starts with its condition (`step-condition`), and says why the new way is better. It is the short lead: the notes put each covered PR's own `Update-Needs:` line under it, word for word, so the item need not restate that line ([Labels and the display rule](#labels-and-the-display-rule)).
 
-- Good: `Update mods before runs: If you pass --pull to a run command to update mods, run powerpipe mod update before the run instead. It updates them before the run reads them, not one run late.`
-- Not good: `Update mods before runs: If you use --pull, note that it is deprecated in this release and that the run commands have changed how they handle mods.` (no replacement, and no reason the new way is better)
+- Good: ``Update mods before runs: If you pass `--pull` to a run command to update mods, run `powerpipe mod update` before the run instead. It updates them before the run reads them, not one run late.``
+- Not good: ``Update mods before runs: If you use `--pull`, note that it is deprecated in this release and that the run commands have changed how they handle mods.`` (no replacement, and no reason the new way is better)
+
+### A change that refuses what worked before
+
+A change that now refuses an input, a config or a flag that worked in the last release gets a `Before you upgrade` item, whatever its group. So does a risk of that shape, where something that worked is now refused. The PR keeps its own group (`Improvements`, `Security` and so on) and still gets its own item; the step is a second item covering the same PR, as a removal's action is. A person who runs the old way should read about it before the upgrade, never find it out when it fails.
+
+- Good: a PR that tightens how a config key is read is grouped `Improvements`, with its own item, and a second item under `Before you upgrade`: `Mod paths: If your config sets mod_path with a slash at the end, remove the slash before you upgrade. The new version refuses it and stops at startup.`
+- Not good: the same PR as one `Improvements` item, `Stricter mod_path: The server now checks mod_path more carefully.` (a config that worked is now refused, and no step says so, so a person finds out when the server stops)
+
+### A step names the exact change
+
+A `Before you upgrade` item names the exact change to make, in the words of the input itself: the character, setting or value to add, remove or write, and where. A step that only says to check or fix something leaves the reader to find out what to do.
+
+- Good: `If your config sets base_url, add a slash at the end before you upgrade. The new version refuses one without it.`
+- Not good: `Check your base_url: If your config sets base_url, fix it before you upgrade. The new version can refuse it.` (no change named, so the reader cannot act)
+
+### A dependency bump
+
+A bump PR's own text is often cut short, and a version change shows nothing of what the dependency now does. The writer reads the dependency's release notes for each version the bump crosses, and judges each change against what a user of the product can hit. A change that refuses an input, a config or a flag that worked before gets a `Before you upgrade` item, as above, though the bump itself is grouped `Internal`, `Security` or `Improvements`. When the product hands the dependency an input it parses (a URL, a path, a config value), each refusal the dependency's notes give for a form of that input is a candidate for the product's own input, whether or not the PR's text names it, unless the product's code or docs show no user can reach it. The writer's final message says which release notes were read.
+
+### A file a user edits
+
+Name a file or folder a user writes or edits, in a code span, because a reader searches the notes for the name they know. The lint refuses a path into the product's source (`lib/prep.js`, `pkg/query/execute`, `src/main.rs:42`), never `pg_hba.conf`.
+
+- Good: ``Rules in `pg_hba.conf.d/` now load after the ones in `pg_hba.conf`.``
+- Not good: `Your own database access rules now load in a new order.` (the reader who wrote those rules cannot tell which they are)
+
+### What a user types is in code
+
+A command, a flag, an environment variable, a value or a message that a user types or sees is in a code span (between backticks), wherever the notes name it: in the title, the summary, an item's name and an item's text. A reader cannot copy what they cannot pick out, and a sentence's full stop sticks to a flag. The lint refuses a `--flag` or an `ENV_VARIABLE` outside a code span (`code-span-missing`); a command, a value or a message is the writer's to judge. A message a user sees goes in a code span too, inside a sentence of its own: never a fragment such as "in place of plugin not installed". The #releases post shows a code span as code, with no backtick left.
+
+- Good: ``Stop the service at once: `steampipe service stop --force` stops the service even while queries run. Set `--query-timeout` to cap one query, and `STEAMPIPE_MAX_PARALLEL` to cap how many run at once.``
+- Not good: `Stop the service at once: steampipe service stop --force stops the service even while queries run. Set --query-timeout to cap one query, and STEAMPIPE_MAX_PARALLEL to cap how many run at once.` (Steampipe v2.5.3 showed its flags and variables as plain text: a reader cannot pick out what to type, and a full stop follows each name)
+
+### Only what a user notices
+
+An item is a change a user sees: something they can now do, something that works differently, something they must do. A change no user sees is grouped `Internal`, named once in the report's `internal` list, and left out of the notes: a library update with nothing the user uses changed, a leak that was freed, a test or a build step. Ask of each item: what would a user do differently, or see? When the answer is nothing, it is no item. The lint refuses an item that says nothing changes for a user (`item-unseen`); an item about an unseen change that does not say so is the writer's to leave out. A dependency bump is an item only when a user notices it, or when it fixes a CVE ([A dependency bump](#a-dependency-bump)).
+
+- Good: no item. The Go library update is grouped `Internal`, and the report's `internal` list says `A library was updated`.
+- Not good: `Updated Go libraries: Go libraries are updated. Nothing you use changes.` (Tailpipe v0.9.0 shipped this: an item that says itself that no user notices it is no item. Steampipe v2.5.3's `Query timeouts freed` was the same kind of leak no user sees)
+
+### A security item says what was at risk
+
+A `Security` item says, after what the user gains, what was exposed, in which versions, and what to do about it: whether anything already written (a log, a file, a token) may hold what leaked, and whether to change or delete it. It never says how to exploit the problem, and it names no advisory before it is published; once it is published, the item links it once. "Fixed" or "stays put" alone leaves a user unable to judge whether to act.
+
+- Good: ``Errors keep passwords out of logs: Error messages leave out a connection's password. Before 2.5.3 a failed connection could write it to the log, so if you kept or shared those logs, delete them and change that password.``
+- Not good: `Errors hide passwords: Errors no longer show passwords.` (Steampipe v2.5.3: it does not say whether old logs may hold a password, in which versions, or what to do. Powerpipe v1.9.0's `Dependencies stay put` had the same gap: it never said what could happen before)
+
+### An absolute claim
+
+A claim built on an absolute word ("every", "never", "always", "any", "can no longer", "exactly as") is written only when a PR's `Changelog:` or `Update-Needs:` line, or its diff, makes it. When none does, say what the PR does, with its limit.
+
+- Good: `Your server skips a report that has no title. It still opens one whose title is blank.` (the diff checks only for a missing title, and the item says so)
+- Not good: `Your server never opens an untitled report.` (the diff does not make "never": a blank title still opens, so the claim is false for that case)
 
 ## How the release PR shows it
 
@@ -85,7 +138,7 @@ The release PR's body is a page a person reads in under a minute: about 20 rende
 - **What changes for** the repo's `audience` (`visitors`, `customers` or `repos` in its config; users when it has none): a Before \| Now table, a row for each change, the kind first (the first of the six labels, in their order, that groups a PR it covers: `Security`, `What's new`, `Bug fixes` and so on), then one line naming the `internal` changes. When no change is one a user sees: **What changes: nothing** they see, then each `internal` change as a bullet, 5 at most;
 - **Could it break anything?** with `safety.answer`, then `safety.why`, then an If \| Then table: a row for each of `risks` (an `untested` reason after its If text), and last, how to go back: the version, which the tool names, then `undo.how` and `undo.howLong`.
 
-Then two folds, never one inside another: **What gets published**, a table of where each text goes and each text word for word (the GitHub Release's text, the CHANGELOG section, and the release notes), and **Evidence**, with a table of who asked for, made and reviewed each change, a table of the checks, a table of the facts of the release and what happens on merge. `managerNotes` are a comment on the PR.
+Then two folds, never one inside another: **What gets published**, a table of where each text goes and the text word for word (the release notes, which are the GitHub Release's text and the page's, or the CHANGELOG section for a release with no release notes), and **Evidence**, with a table of who asked for, made and reviewed each change, a table of the checks, a table of the facts of the release and what happens on merge. `managerNotes` are a comment on the PR.
 
 Above the folds, the manager's fields (`headline`, `ask`, each change's `before`, `after` and `label`, `safety`, `risks`, `undo` and each `internal` text) hold none of the words for how Shipyard runs a release: ship, hold, level, major, minor, patch, drove, independent, second approver, record, prep, facts, cut, ship job, tag, merge back, digest, job, run, workflow, step, artifact, input, pin, evidence, not judged, made or asked for and today. Nor a PR number, a commit, a file path, a config key or code in backticks, or an HTML code such as `&#35;`. Say what happens in plain words instead. The public release notes are exempt: their readers are the product's users.
 
@@ -136,7 +189,7 @@ Each item carries its `kind`, one of the six labels. The release notes show the 
 - `Before you upgrade` and `Security` are **always labelled**.
 - In every other case, each label that has items shows as a `## <label>` line, in this order: `Before you upgrade`, `Security`, `What's new`, `Improvements`, `Bug fixes`, `Requirements`. A label with no items does not show.
 
-So a writer never writes an empty or out-of-order label: the order of `items` in the file sets only the order inside one label. The CHANGELOG section follows the same rule at `### <label>`. The optional `notes.reference` comes last, under a `---` line, and never counts as an item. Each example below is a `notes` object, then the text the release notes show for it; a test renders each with the real code and compares.
+So a writer never writes an empty or out-of-order label: the order of `items` in the file sets only the order inside one label. The CHANGELOG section follows the same rule at `### <label>`. A `Before you upgrade` item is followed by each PR it covers whose facts hold an `Update-Needs:` line, in `covers` order, as `  - Update needs: <line>`, word for word, as the CHANGELOG section writes it; the cut adds these lines when it renders the notes, so the item stays the short lead and need not restate the line. In a public repo the cut also ends every item, of any label, with a link to each PR it covers, `([#12](https://github.com/<owner>/<name>/pull/12))`, so a reader can go from the item to the change; a private repo's notes get none. Never write these links in an item's `text`: the cut adds them. A covered PR with no line, and an item of any other label, add no `Update needs:` line, and the #releases post never shows the line (its action block is the item's own name and first sentence). The optional `notes.reference` comes last, under a `---` line, and never counts as an item. Each example below is a `notes` object, then the text the release notes show for it; a test renders each with the real code and compares.
 
 #### Example: one kind, no labels
 
@@ -188,6 +241,36 @@ A fix keeps your session tokens out of the debug logs.
 - **Session tokens stay private:** Your session tokens stay out of the debug logs. If you turned debug logs on before this release, delete the old ones.
 ```
 
+#### Example: a step and its PR's own line
+
+A `Before you upgrade` item covers PR #301, whose `Update-Needs:` line is `Move the api_key setting from config.toml into secrets.toml before you start the new version.` The cut renders the line under the item, word for word; the item itself stays the short lead. The PR's line is read from the facts, not from the prep file.
+
+```json
+{
+  "title": "Example Product v1.6.0 - keys live in their own file",
+  "summary": "Your API key now lives in its own file, so a shared config no longer exposes it.",
+  "items": [
+    { "kind": "Before you upgrade", "name": "Move the API key", "text": "If your config.toml sets api_key, move it to secrets.toml. The new version no longer reads it from config.toml.", "covers": [301] },
+    { "kind": "Improvements", "name": "Keys in their own file", "text": "Your API key stays out of the config you share. Nothing else about the config changes.", "covers": [301] }
+  ]
+}
+```
+
+```markdown
+# Example Product v1.6.0 - keys live in their own file
+
+Your API key now lives in its own file, so a shared config no longer exposes it.
+
+## Before you upgrade
+
+- **Move the API key:** If your config.toml sets api_key, move it to secrets.toml. The new version no longer reads it from config.toml.
+  - Update needs: Move the api_key setting from config.toml into secrets.toml before you start the new version.
+
+## Improvements
+
+- **Keys in their own file:** Your API key stays out of the config you share. Nothing else about the config changes.
+```
+
 #### Example: mixed kinds, every label in order
 
 Five kinds, written out of order in the file. The notes show the labels in the fixed order, each with its items, then the `reference` block under a rule. The #releases post shows the `Before you upgrade` item as its action block and each other item's name and first sentence; it shows no labels and no reference lists. The removed option has its own item under `What's new`, and the step it asks for is under `Before you upgrade`.
@@ -200,8 +283,8 @@ Five kinds, written out of order in the file. The notes show the labels in the f
     { "kind": "Bug fixes", "name": "Midnight runs fixed", "text": "Your runs that cross midnight show the day they started.", "covers": [103] },
     { "kind": "Requirements", "name": "Newer runtime needed", "text": "You need version 20 of the runtime or newer to run Example Product.", "covers": [112] },
     { "kind": "Improvements", "name": "Faster search page", "text": "Your search page opens twice as fast on large projects. Nothing changes in how it looks.", "covers": [110] },
-    { "kind": "Before you upgrade", "name": "Rename the export option", "text": "If a script of yours calls the export with --csv, use --format csv instead. One option now names every format.", "covers": [108] },
-    { "kind": "What's new", "name": "CSV option removed", "text": "The export's --csv option is removed. Use --format csv, which does the same.", "covers": [108] },
+    { "kind": "Before you upgrade", "name": "Rename the export option", "text": "If a script of yours calls the export with `--csv`, use `--format csv` instead. One option now names every format.", "covers": [108] },
+    { "kind": "What's new", "name": "CSV option removed", "text": "The export's `--csv` option is removed. Use `--format csv`, which does the same.", "covers": [108] },
     { "kind": "What's new", "name": "Spreadsheet downloads", "text": "You can download any report as a spreadsheet from its page.", "covers": [101] }
   ],
   "reference": [
@@ -218,11 +301,11 @@ You can download any report as a spreadsheet, the search page loads faster and a
 
 ## Before you upgrade
 
-- **Rename the export option:** If a script of yours calls the export with --csv, use --format csv instead. One option now names every format.
+- **Rename the export option:** If a script of yours calls the export with `--csv`, use `--format csv` instead. One option now names every format.
 
 ## What's new
 
-- **CSV option removed:** The export's --csv option is removed. Use --format csv, which does the same.
+- **CSV option removed:** The export's `--csv` option is removed. Use `--format csv`, which does the same.
 - **Spreadsheet downloads:** You can download any report as a spreadsheet from its page.
 
 ## Improvements
@@ -342,14 +425,16 @@ A level above the floor passes: a repo may call a release a minor for a reason o
 - an item of kind `Before you upgrade` has a `text` that does not start with `If`, `When`, `Before`, `Once` or `Only`, in any case (`step-condition`): the #releases post shows it as "Action needed" and it says who must act and when. A prep cut earlier is read as it is;
 - a new cut's `notes.title` is not `<Product> v<version> - <the main point>`, with the product's own name from the facts (`title-shape`): a missing `v`, the product's name changed or a missing main point. The number itself is the release check's job;
 - a new cut's `notes.title` has a main point that leads with a removal or deprecation (`no longer`, `removed`, `removes`, `removal`, `deprecated`, `deprecates`, `deprecation`, `drops`, `dropped`) while at least one item is news (`title-removal`): the title is the best thing a user gets from the release, and the removal has its own item. A release that is only removals, with its action under `Before you upgrade`, keeps a removal title. A prep cut earlier is read as it is;
-- a new cut's item, other than `Before you upgrade` and other than a removal or deprecation item, whose first sentence has no word addressed to the reader (`you`, `your`, `yours`, `yourself`, `yourselves`, `you're`, `you'll`, `you've`, `you'd`) or leads with `no longer` (`item-gain-first`): the #releases post shows only the first sentence, so it says what the reader gains, to them, and the mechanism comes after. A prep cut earlier is read as it is;
+- a new cut's item, other than `Before you upgrade` and other than a removal or deprecation item, whose first sentence leads with `no longer` (`item-gain-first`): the #releases post shows only the first sentence, so it says what the user gains, and the mechanism comes after. The lint does not ask for the word "you". A prep cut earlier is read as it is;
+- a new cut's item, other than `Before you upgrade`, with a sentence, or the end of one after a comma, a semicolon or a colon, that says nothing changes for a user (`Nothing you use changes.`, `Nothing changes for users.`, `with no change for you`, `and you will not notice it`, `no user-visible change`) (`item-unseen`): a sentence that only holds such words, such as `nothing changes for users who set none`, is not read: a change no user notices is grouped `Internal` and left out of the notes. A prep cut earlier is read as it is;
+- a new cut's notes title, summary, item name or item text that names a command-line flag (`--query-timeout`) or an environment variable (`STEAMPIPE_MAX_PARALLEL`: capitals with an underscore) outside a code span (`code-span-missing`): what a user types is between backticks. A code span, and a link's address, are not read for it. A prep cut earlier is read as it is;
 - a new cut's notes title, summary, item name or item text that holds a word that sells instead of telling, such as `amazing`, `seamless`, `blazing` or `game-changing` (`hype-word`): the notes stay factual, and a fact can be "faster". A prep cut earlier is read as it is;
 - an item's `kind` is not one of the six labels, or `notes.items` is empty (`schema`);
 - an item of the release notes of a kind other than `Before you upgrade` has no `name` (`item-name-missing`), a `name` of fewer than 2 or more than 4 words (`item-name-length`), or a `text` over 300 characters (`item-text-too-long`);
 - the release notes (title, summary, an item's name or text, a reference title or an entry) hold:
   - an internal term from the facts' `internalTerms`, matched as a whole word in any case (`internal-term`);
   - a private link (`private-link`), with any scheme (`https://`, `ftp://`, `file://`) or none: a GitHub link (an `api.github.com/repos/…` link, a `git@github.com:<owner>/<repo>.git` remote, or a `<owner>/<repo>#12` or `<owner>/<repo>@<sha>` reference, which GitHub turns into a link) into a repo that is neither the product repo when it is public nor one of `publicRepos` (GitHub's own pages such as `github.com/features` are fine); a GitHub attachment or a gist; a link to an IP address, a host with no dot (`http://buildbox/`), or a `localhost`, `.local`, `.internal`, `.intranet`, `.corp` or `.lan` host; a link to Slack, claude.ai, Google Docs or Drive, Notion, Linear, Atlassian or Figma; a link to one of `privateHosts`; or a link with a user name or password in it. With no scheme, an IP address or `localhost` counts only with a port or a path, so a version such as `1.2.3.4` is fine;
-  - a file path or a file's name (`file-path`; not checked in the `reference` lists, where a type's name can look like a path), with or without a line number, a line anchor or a query: `lib/prep.js`, `src/main.rs:42`, `src/main.rs#L42-L50`, `./run.sh`, `~/.config`, `$HOME/.config`, `%APPDATA%\example`, `/etc/hosts`, `.github/workflows`, `C:\tools`, `C:/tools`, a lowercase path of three parts or more, or ending in `/`, that starts in a source folder (`pkg/`, `internal/`, `cmd/`, `src/`, `lib/`, `vendor/`, `node_modules/`, `dist/` or `usr/`, as in `pkg/query/execute` or `internal/auth/`; prose such as `internal/external`, `build/deploy`, `Linux/macOS/Windows` or `11/13/2026` is fine), or a name such as `server.go`, `config.yml` or `.gitignore` (a product's name such as `Node.js`, and a kind of file such as `.json` or `.env`, is fine; a link's address is checked as a link, not a path);
+  - a path into the product's source (`file-path`; not checked in the `reference` lists, where a type's name can look like a path): a path that starts in a source folder (`pkg/`, `internal/`, `cmd/`, `src/`, `lib/`, `vendor/`, `node_modules/`, `dist/` or `usr/`) with three parts or more, or ending in `/`, as in `pkg/query/execute` or `internal/auth/` (prose such as `internal/external`, `build/deploy`, `Linux/macOS/Windows` or `11/13/2026` is fine); a source file, one that ends in `.go`, `.js`, `.ts`, `.py`, `.rs`, `.java`, `.sh`, `.html`, `.css` or another source extension, such as `lib/prep.js` or `server.go`; or any file name or path with a line number or a line anchor, such as `src/main.rs:42` or `config.yml#L3`. The name of a file a user writes or edits passes: `pg_hba.conf`, `pg_hba.conf.d/`, `config.spc`, `~/.steampipe/config`, `config.yml` or `.gitignore`. Put such a name in a code span, so a reader can search for it. The report above the folds keeps the stricter rule above and refuses every file path and name, with or without a line number, a line anchor or a query: `lib/prep.js`, `src/main.rs:42`, `./run.sh`, `~/.config`, `$HOME/.config`, `%APPDATA%\example`, `/etc/hosts`, `.github/workflows`, `C:\tools`, `C:/tools`, a folder named for a file such as `pg_hba.conf.d/`, a lowercase path of three parts or more, or ending in `/`, that starts in a source folder, or a name such as `server.go`, `config.yml` or `.gitignore` (a product's name such as `Node.js`, and a kind of file such as `.json` or `.env`, is fine; a link's address, such as `docs.rs/`, is checked as a link, not a path);
 - the report is over 300 words (`report-too-long`). Every word of `report` counts but the ask's own paragraph (`report.ask`, 15 to 70 words of its own): the headline, each change with its before, after and label, the safety answer and why, each risk, the undo, each internal change and each note for the release manager. The PR numbers in `covers` and the fixed words of the release PR are not words of the report.
 
 A problem names the field, never the text it matched, because the log of a public repo is public. A field outside the format is named by its place in its object (`notes: holds a field outside this format (field 4)`), not by its name, and an answer to an unknown flag does not repeat the flag.

@@ -1,6 +1,6 @@
 # Tags a release once it has shipped: an annotated tag at the release PR's merge commit, made as
 # the area's release App, and the floating major tag (`v1`) moved when the repo has one. Then the
-# GitHub Release at the tag (its body the CHANGELOG section) and one "Shipped" comment on the
+# GitHub Release at the tag (its body the approved release notes, else the CHANGELOG section) and one "Shipped" comment on the
 # release PR, each made once.
 # docs/release-tag.md says which signals a repo wires up.
 #
@@ -72,7 +72,7 @@ on:
         type: string
         default: ''
       changelog:
-        description: The product's changelog, relative to the repo. Its section for the version is the GitHub Release's body.
+        description: The product's changelog, relative to the repo. Its section for the version is the GitHub Release's body for a release with no release notes.
         type: string
         default: CHANGELOG.md
       assets:
