@@ -1,0 +1,124 @@
+# A `/prepare-again` request on an open release PR: the router's `prepare-again` job (router.yml) calls this, from the dispatch
+# `shipyard comment` makes for a person with write access (pr.yml). It runs `shipyard prepare-again`, which reads the comment
+# and the PR again from GitHub, checks the request (the comment is the command, on this PR, by a person; the PR is an open release
+# PR of this repo; the author is an area approver, read with the token `/level` uses; the release can be prepared again and no
+# other request is pending), files one prep job for the release in this repo, labelled `agent:release`, and replies on the PR with
+# the request marker the cut and the record read. Every refusal replies on the PR with its reason and files nothing.
+#
+# Source of truth is this file in turbot/shipyard (workflows/). It is published to .github/workflows/ in
+# turbot/shipyard-workflows, and the router calls that copy from its own commit.
+#
+# What it trusts. The inputs are the route job's, which it worked out from the dispatch and the repo's settings; the comment, the
+# PR and the release data are read again from GitHub and checked, never taken from the dispatch. The repo's history is checked
+# out as data, to name the commit of Shipyard the repo's cut is pinned to, and nothing in it is run. Nothing of the comment's
+# text reaches a shell, the prep job or the prep run. Shipyard runs at the commit this workflow itself was called at.
+
+name: Prepare again
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: The release PR's number.
+        type: string
+        required: true
+      comment:
+        description: The ID of the `/prepare-again` comment on it.
+        type: string
+        required: true
+      approvers:
+        description: The area's approver team, as <org>/<team-slug>. Only its members can ask for a new prep, as for /level.
+        type: string
+        default: ''
+      automation-logins:
+        description: The accounts that open release PRs, comma-separated. A comment from one is not from a person.
+        type: string
+        default: ''
+      prepare-again-note:
+        description: Why the router cannot prepare this repo's release again (it owns its cut or record, or has no candidate build), or empty. When set, the request is refused with it.
+        type: string
+        default: ''
+    secrets:
+      org-token:
+        description: A token that can read the approver team's members (SHIPYARD_ORG_TOKEN), as the release check reads it.
+        required: false
+
+permissions: {}
+
+jobs:
+  prepare-again:
+    name: prepare-again
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One request of a PR at a time: a second waits, then finds the first one's reply and is refused as pending.
+    concurrency:
+      group: shipyard-prepare-again-${{ github.repository }}-${{ inputs.pr }}
+      cancel-in-progress: false
+    permissions:
+      contents: read        # the repo's history, to read the pin of its cut; and the release PR's commits
+      pull-requests: read   # the release PR
+      issues: write         # the prep job, and the reply on the PR
+      id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    steps:
+      # Every branch and tag, as data; nothing from the checkout is ever run.
+      - name: Check out the repo's history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: caller
+          fetch-depth: 0
+          persist-credentials: false
+
+      # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
+      # workflow, which is the commit of shipyard to run.
+      - name: Find this workflow's commit
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/prepare-again.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows prepare-again.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Prepare again::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # Inputs reach the command as environment, never as shell text.
+      - name: Check the request and file the prep job
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SHIPYARD_ORG_TOKEN: ${{ secrets.org-token }}
+          PR: ${{ inputs.pr }}
+          COMMENT: ${{ inputs.comment }}
+          APPROVERS: ${{ inputs.approvers }}
+          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          NOTE: ${{ inputs.prepare-again-note }}
+        run: |
+          args=(--pr "$PR" --comment "$COMMENT" --dir caller)
+          [ -n "$APPROVERS" ] && args+=(--approvers "$APPROVERS")
+          [ -n "$AUTOMATION_LOGINS" ] && args+=(--automation-logins "$AUTOMATION_LOGINS")
+          [ -n "$NOTE" ] && args+=("--note=$NOTE")
+          node shipyard/bin/shipyard prepare-again "${args[@]}"

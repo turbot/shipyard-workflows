@@ -27,6 +27,13 @@
 # tag: started by hand on the working branch, its commit is the tip of `base` (`main`, or `main-<x.y>`), the facts list
 # the fix PRs (`shipyard facts --fixes`), the prep file is checked against them as any cut's, and the cut picks the fixes
 # onto `release/<next patch>` after the cut commit, which records the working branch for the merge-back.
+# A cut prepared again (`/prepare-again` on an open release PR, lib/prepare-again-cut.js): when an open release PR already holds
+# the facts' range and has a pending accepted request, the cut adds one commit to that PR's branch, for the same version, with
+# only this version's CHANGELOG section made again from the new prep and the new release data pinned. It writes no `release-pr`
+# artifact, so nothing opens or comments on a PR. It uploads the artifact `prepared-again` (`prepared-again.json`, and when applied
+# `body.md`, the PR's new body) and sets the outputs `prepared-again-pr` and `prepared-again` (`applied` or `refused`), which the
+# router's prepared-again job reads to put the new body on the PR. A new prep at another level is refused (`/level` changes it),
+# and the artifact and the outputs say so. Both outputs are empty for every other cut. No permission is added for it.
 #
 # Nothing from the caller's inputs goes into a shell line: each reaches a step as an environment
 # variable and is checked there. The caller's code is never run with the token in its environment.
@@ -35,6 +42,13 @@ name: Cut a release
 
 on:
   workflow_call:
+    outputs:
+      prepared-again-pr:
+        description: The release PR a cut prepared again put the new prep on (the artifact `prepared-again` holds what it did), or empty when the cut was no prepared-again cut.
+        value: ${{ jobs.cut.outputs.prepared-again-pr }}
+      prepared-again:
+        description: 'applied: the new prep is one commit on that PR''s branch, and the artifact holds its new body. refused: it was not applied, and the artifact says why. Empty for every other cut.'
+        value: ${{ jobs.cut.outputs.prepared-again }}
     inputs:
       commit:
         description: The full 40-character commit the prep job read. The facts end here; the release is cut from it, and it must be in the history of the commit this run started from (a re-ship's and a patch's is the tip of its base, see reship and patch).
@@ -102,6 +116,9 @@ jobs:
       pull-requests: read   # the facts read each PR; the cut looks for candidates holding a number
       actions: read         # download the prep job's artifact
       id-token: write       # learn which commit of this workflow is running (job_workflow_sha)
+    outputs:
+      prepared-again-pr: ${{ steps.again.outputs.pr }}
+      prepared-again: ${{ steps.again.outputs.outcome }}
     env:
       COMMIT: ${{ inputs.commit }}
       PREP_RUN: ${{ inputs.prep-run }}
@@ -316,8 +333,44 @@ jobs:
             --facts "$RUNNER_TEMP/release/facts.json" --prep "$RUNNER_TEMP/release/prep.json" \
             --dir caller --out "$RUNNER_TEMP/release/release-pr" --base "$BASE" --changelog "$CHANGELOG" --within "$GITHUB_SHA" "${work[@]}" "${shipyard[@]}"
 
-      # The four files the hook reads, and no others.
+      # A cut prepared again writes `prepared-again/` in place of the release-pr files, applied or refused, so it is read even when
+      # the cut failed (a refused level). Its PR and outcome are the job's outputs; both stay empty for every other cut.
+      - name: Read the prepared-again outcome
+        id: again
+        if: always()
+        shell: bash
+        env:
+          AGAIN_FILE: ${{ runner.temp }}/release/release-pr/prepared-again/prepared-again.json
+        run: |
+          if [[ ! -f "$AGAIN_FILE" ]]; then echo 'Not a prepared-again cut.'; exit 0; fi
+          node - <<'JS'
+          const fs = require('node:fs');
+          let r;
+          try {
+            r = JSON.parse(fs.readFileSync(process.env.AGAIN_FILE, 'utf8'));
+          } catch {
+            r = null;
+          }
+          if (!r || !Number.isSafeInteger(r.pr) || r.pr < 1 || !['applied', 'refused'].includes(r.outcome)) {
+            console.log('::error title=Cut::prepared-again.json does not name a PR and an outcome (applied or refused)');
+            process.exit(2);
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `pr=${r.pr}\noutcome=${r.outcome}\n`);
+          console.log(`Prepared again: #${r.pr}, ${r.outcome}.`);
+          JS
+
+      - name: Upload the prepared-again artifact
+        if: always() && steps.again.outputs.outcome != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prepared-again
+          path: ${{ runner.temp }}/release/release-pr/prepared-again/
+          if-no-files-found: error
+          retention-days: 14
+
+      # The four files the hook reads, and no others. A cut prepared again writes none: it opens no PR.
       - name: Upload the release-pr artifact
+        if: steps.again.outputs.outcome == ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-pr

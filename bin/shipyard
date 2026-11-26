@@ -38,6 +38,7 @@ const STEPS = {
   route: () => require('../lib/route-command'),
   kind: () => require('../lib/kind-command'),
   schedule: () => require('../lib/schedule-command'),
+  'prepare-again': () => require('../lib/prepare-again-command'),
 };
 
 async function main(argv) {

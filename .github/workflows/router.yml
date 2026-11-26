@@ -3,7 +3,9 @@
 # repo's `.github/shipyard.yml`, and never one the repo owns; then one job for each flow calls the published workflow that runs
 # it, with what the config resolves:
 #
-#   dispatch `prep`                     prep (prep.yml), then cut (cut.yml), on the default branch
+#   dispatch `prep`                     prep (prep.yml), then cut (cut.yml), on the default branch; after a cut that prepared an
+#                                       open release PR again, the record's prepared-again mode (record.yml), which puts the new
+#                                       page on that PR or answers the refusal
 #   PR into a release branch            the candidate by kind, then the record; the release check (release-check.yml) only
 #                                       when the run builds no candidate (the check job says why)
 #   review of such a PR                 the release check, which re-judges the approval, then the record (record.yml), which reads
@@ -22,6 +24,8 @@
 #   dispatch `prerelease-files`         the build of a prerelease's files by kind (a go-cli's, go-cli-prerelease-build.yml), on the
 #                                       work branch: the dispatch the `prerelease` run above makes, never on `main`
 #   dispatch `announce`                 the announcement (announce.yml) of the tag `args.tag` names, on the default branch
+#   dispatch `prepare-again`            a `/prepare-again` request on an open release PR (prepare-again.yml), on its base branch:
+#                                       checks it, files a prep job for the release and replies on the PR
 #
 # The ask after a record is not run here: the record starts it, once it writes SHIP, by dispatching `shipyard-release.yml` with
 # the action `ask` on the default branch, where the `slack` environment lets it run, and the gate the same way on `main`
@@ -95,7 +99,7 @@ on:
         description: The Slack app's bot token, the org secret of that name (docs/release-ask.md). The ask and the announcement read it.
         required: false
       SHIPYARD_ORG_TOKEN:
-        description: A token that can read the approver team's members (docs/release-check.md, docs/release-prerelease.md). The release check reads it; a prerelease does not (it makes its own from the release App key).
+        description: A token that can read the approver team's members (docs/release-check.md, docs/release-prerelease.md). The release check and a `/prepare-again` request read it; a prerelease does not (it makes its own from the release App key).
         required: false
       WEB_BUILDS_APP_PRIVATE_KEY:
         description: The web builds App key, for a docs site's preview and publish (docs/release-apps.md). No flow of this file reads it yet.
@@ -114,6 +118,8 @@ jobs:
     outputs:
       flows: ${{ steps.route.outputs.flows }}
       pr: ${{ steps.route.outputs.pr }}
+      comment: ${{ steps.route.outputs.comment }}
+      prepare-again-note: ${{ steps.route.outputs.prepare-again-note }}
       head: ${{ steps.route.outputs.head }}
       commit: ${{ steps.route.outputs.commit }}
       prep: ${{ steps.route.outputs.prep }}
@@ -366,6 +372,31 @@ jobs:
     secrets:
       org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
 
+  # A `/prepare-again` on an open release PR, dispatched by `shipyard comment` for a person with write access. The job reads the
+  # comment again, checks that its author is an area approver (the team and the token the release check's `/level` uses), files
+  # one prep job for the release and replies on the PR; every refusal replies with its reason. The route job's note refuses a
+  # repo whose cut or record the router does not run, which would leave a new prep unapplied or the page behind its head.
+  prepare-again:
+    name: prepare-again
+    needs: route
+    if: >-
+      contains(fromJSON(needs.route.outputs.flows), 'prepare-again')
+      && github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read        # the repo's history, for the pin of its cut, and the release PR's commits
+      pull-requests: read   # the release PR
+      issues: write         # the prep job, and the reply on the PR
+      id-token: write
+    uses: ./.github/workflows/prepare-again.yml
+    with:
+      pr: ${{ needs.route.outputs.pr }}
+      comment: ${{ needs.route.outputs.comment }}
+      approvers: ${{ needs.route.outputs.approvers }}
+      automation-logins: ${{ needs.route.outputs.automation-logins }}
+      prepare-again-note: ${{ needs.route.outputs.prepare-again-note }}
+    secrets:
+      org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
+
   record:
     name: record
     needs: [route, candidate-go-cli, candidate-go-library, check]
@@ -404,6 +435,43 @@ jobs:
       ask-workflow: shipyard-release.yml
       gate-workflow: shipyard-release.yml
       # The same as the gate's, so the two count alike (docs/release-gate.md): a record's own check is never judged.
+      ignore-checks: record / record
+
+  # A cut that prepared an open release PR again (`/prepare-again`) added one commit to its branch and wrote the artifact
+  # `prepared-again`; nothing else would put the new page on the PR, because the cut pushed with the job's own token and so started
+  # no run on the new head. This job runs the record's prepared-again mode in the same run: it answers a refused cut on the PR,
+  # or puts the cut's new body on the PR and records the new head from the release run the old page named, so nothing is built
+  # and staging does not run again.
+  # When it runs: GitHub's documentation for reusable workflows says a caller reads a called workflow's outputs, and does not say
+  # they reach it when the call failed. A refused cut fails (it exits 1), so this job does not wait on its output for that: it
+  # runs after a cut that reports `prepared-again-pr` (an applied one, which succeeded) and after any cut that failed, and the
+  # record reads the PR from the artifact. A cut that failed for another reason uploaded no artifact, and the record then does
+  # nothing. A cut that succeeded with no output prepared nothing again, and this job is skipped.
+  prepared-again:
+    name: prepared-again
+    needs: [route, prep, cut]
+    if: >-
+      !cancelled()
+      && needs.route.result == 'success'
+      && contains(fromJSON(needs.route.outputs.flows), 'cut')
+      && github.event_name == 'workflow_dispatch'
+      && (needs.cut.result == 'failure'
+      || (needs.cut.result == 'success' && needs.cut.outputs.prepared-again-pr != ''))
+    permissions:
+      contents: write        # the record job's own grant (it marks the release PR ready, or a draft); nothing is committed
+      pull-requests: write   # the new body, and the reply on the request
+      issues: read
+      checks: read
+      statuses: write        # the dispatched runs' results, and shipyard/ask, on the PR's new head
+      actions: write         # download this run's artifact and the old run's results, run the ci workflow, start the ask and the gate
+      id-token: write
+    uses: ./.github/workflows/record.yml
+    with:
+      pr: ${{ needs.cut.outputs.prepared-again-pr }}
+      prepared-again: true
+      required-check-workflows: ${{ needs.route.outputs.ci-workflows }}
+      ask-workflow: shipyard-release.yml
+      gate-workflow: shipyard-release.yml
       ignore-checks: record / record
 
   # Enters the `slack` environment, which allows the default branch only.

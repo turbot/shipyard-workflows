@@ -240,6 +240,21 @@
         "prep": {}
       }
     },
+    "prepare-again.yml": {
+      "inputs": [
+        "comment",
+        "pr"
+      ],
+      "secrets": [],
+      "jobs": {
+        "prepare-again": {
+          "contents": "read",
+          "id-token": "write",
+          "issues": "write",
+          "pull-requests": "read"
+        }
+      }
+    },
     "prerelease-build.yml": {
       "inputs": [
         "assets",
@@ -281,11 +296,15 @@
       }
     },
     "record.yml": {
-      "inputs": [
-        "pr"
-      ],
+      "inputs": [],
       "secrets": [],
       "jobs": {
+        "prepared-again": {
+          "actions": "read",
+          "contents": "read",
+          "id-token": "write",
+          "pull-requests": "write"
+        },
         "record": {
           "actions": "write",
           "checks": "read",
@@ -430,6 +449,21 @@
           "pull-requests": "read"
         },
         "prep": {},
+        "prepare-again": {
+          "contents": "read",
+          "id-token": "write",
+          "issues": "write",
+          "pull-requests": "read"
+        },
+        "prepared-again": {
+          "actions": "write",
+          "checks": "read",
+          "contents": "write",
+          "id-token": "write",
+          "issues": "read",
+          "pull-requests": "write",
+          "statuses": "write"
+        },
         "prerelease-build": {
           "actions": "write",
           "contents": "read",

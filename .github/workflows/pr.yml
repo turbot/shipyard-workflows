@@ -12,12 +12,13 @@
 #                        PR body and posts the commit status `shipyard/changelog-line` on the PR's
 #                        head (github.event.pull_request.head.sha). A PR into any other branch: nothing.
 #   workflow_dispatch    the sweep: check every open PR into `develop` and post each one's status.
-#   issue_comment        the `comment` job, a job of its own: `/shipped` or `/level` on a PR, in a repo on
+#   issue_comment        the `comment` job, a job of its own: `/shipped`, `/level` or `/prepare-again` on a PR, in a repo on
 #                        .github/shipyard.yml. It runs `shipyard comment`, which checks the commenter has write access (and,
 #                        for `/shipped`, that the PR is a merged release PR) and starts `shipyard-release.yml` on the PR's base
 #                        branch: `/shipped` with the action `shipped`, `/level` with the action `check`, which runs the release
-#                        check, the only code that reads `/level`, and ignores one that is not from the area's approver team. A
-#                        repo not on shipyard.yml is skipped: its own workflows answer both comments. Every other comment does
+#                        check, the only code that reads `/level`, and ignores one that is not from the area's approver team,
+#                        `/prepare-again` with the action `prepare-again`, whose run checks the approver team too. A
+#                        repo not on shipyard.yml is skipped: its own workflows answer these comments. Every other comment does
 #                        nothing. A comment that only starts like one (`/shipped now`) starts a runner, and the command skips it.
 #
 # The two jobs are apart so the token that starts a workflow (`actions: write`) is never the one a fork's `pull_request_target`
@@ -124,22 +125,22 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: node shipyard/bin/shipyard changelog-line --sweep --work-branch develop
 
-  # `/shipped` and `/level`, on a new comment on a PR that starts with one of them. This is narrower than the caller's own filter
+  # `/shipped`, `/level` and `/prepare-again`, on a new comment on a PR that starts with one of them. This is narrower than the caller's own filter
   # (a comment on a PR that starts with `/`), never wider: a test evaluates both. `startsWith` is how the caller filters too.
   comment:
     name: comment
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
-      (startsWith(github.event.comment.body, '/shipped') || startsWith(github.event.comment.body, '/level'))
+      (startsWith(github.event.comment.body, '/shipped') || startsWith(github.event.comment.body, '/level') || startsWith(github.event.comment.body, '/prepare-again'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Only what the steps below use (test/pr-permissions.test.js holds both jobs to it). No secret: the approver check of a
     # `/level` is the release check's, which holds the org token.
     permissions:
-      contents: read        # "Answer /shipped and /level" reads the repo's config file and the release PR's files through the API, as data
-      pull-requests: read   # "Answer /shipped and /level" reads the PR and its merge commit
-      actions: write        # "Answer /shipped and /level" starts shipyard-release.yml on the PR's base branch (workflow_dispatch)
+      contents: read        # "Answer the comment commands" reads the repo's config file and the release PR's files through the API, as data
+      pull-requests: read   # "Answer the comment commands" reads the PR and its merge commit
+      actions: write        # "Answer the comment commands" starts shipyard-release.yml on the PR's base branch (workflow_dispatch)
       id-token: write       # "Find this workflow's commit" asks for an OIDC token to learn job_workflow_sha
     steps:
       # `job_workflow_sha` is a claim of the job's OIDC token: the commit of this reusable
@@ -180,7 +181,7 @@ jobs:
           persist-credentials: false
 
       # The comment reaches the command through the event file, never in a shell line.
-      - name: Answer /shipped and /level
+      - name: Answer the comment commands
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}

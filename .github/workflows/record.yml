@@ -24,6 +24,12 @@
 # recorded before the record stopped committing) is read from the evidence its head holds
 # (`shipyard record --from-evidence --update`), or HOLD with the reason. The review commits nothing,
 # runs no check again, and its one other write is the `shipyard/release` status below (or, where `gate-workflow` is set, the start of the release gate, which posts it).
+# With `prepared-again: true` (the router, after a cut that prepared a release PR again for a `/prepare-again`), the third job
+# reads that cut's artifact `prepared-again` of this run. A refusal is answered on the PR and nothing else is written. An applied
+# cut's new body goes on the PR once the PR, its head, the head's trailers and the body's release data all match, carrying the
+# release run the old page named. Then the first job records the new head as it records any head (draft until SHIP, the
+# required checks, their statuses, the body, `shipyard/release` or the gate, and the ask), from that run's results, checked as a
+# review checks them, and answers the request: approvals given before the new head no longer count. Nothing is built.
 # The release PR is a draft until the record has written a SHIP at its head, so an approval is not
 # asked for before the checks have run. The first pass makes the PR a draft (`--draft-until-ship`),
 # so a push to the candidate makes it one again; the pass that writes the body marks it ready on
@@ -69,9 +75,10 @@ on:
   workflow_call:
     inputs:
       pr:
-        description: The release PR's number.
+        description: The release PR's number. Empty only for the prepared-again call, which reads it from the cut's artifact.
         type: string
-        required: true
+        required: false
+        default: ''
       results-run:
         description: The id of the Actions run of this repo that built, tested and staged the candidate. Its artifact `results` holds `results.json`, and `template-diff.txt` and `prod-plan.txt` when the repo's `.github/release.json` switches them on (docs/release-record.md). Required unless `review` is true.
         type: string
@@ -122,18 +129,26 @@ on:
         type: string
         required: false
         default: ''
+      prepared-again:
+        description: True in the same run as a `shipyard cut` that prepared a release PR again (`/prepare-again`), after that cut. The record reads the cut's artifact `prepared-again` of this run. A refused cut is answered on the PR with its reason, and nothing else is written. An applied one puts the cut's new body on the PR, records the new head from the results of the release run the old page named (nothing is built and staging does not run again), and replies that the new report is on the page and needs a fresh approval. `pr` may then be empty, and is read from the artifact; `results-run` is not used. Leave `review` false with it. False by default.
+        type: boolean
+        required: false
+        default: false
 
 permissions: {}
 
 jobs:
   record:
     name: record
-    if: ${{ !inputs.review }}
+    # With `prepared-again`, after the job that put the cut's new page on the PR, and only once it has (it names the release run
+    # the old page named, whose results this job reads); without, that job is skipped and this one runs as it always has.
+    needs: prepared-again
+    if: ${{ !cancelled() && !inputs.review && (!inputs.prepared-again || (needs.prepared-again.result == 'success' && needs.prepared-again.outputs.run != '')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 150   # the two longest waits (60 minutes each: the other checks, then the dispatched runs) and the rest of the job
     # One record per PR at a time; a newer run waits for the one in flight.
     concurrency:
-      group: shipyard-record-${{ github.repository }}-${{ inputs.pr }}
+      group: shipyard-record-${{ github.repository }}-${{ needs.prepared-again.outputs.pr || inputs.pr }}
       cancel-in-progress: false
     permissions:
       contents: write        # for marking the release PR ready for review (and back to a draft), which GitHub refuses a token without it; the record commits nothing and moves no branch
@@ -144,8 +159,10 @@ jobs:
       actions: write         # download the results artifact; run the required-check workflows; read the event of each check run's workflow run
       id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
     env:
-      PR: ${{ inputs.pr }}
-      RESULTS_RUN: ${{ inputs.results-run }}
+      # A release prepared again: the PR the cut prepared again, and the release run the old page named.
+      PR: ${{ needs.prepared-again.outputs.pr || inputs.pr }}
+      RESULTS_RUN: ${{ needs.prepared-again.outputs.run || inputs.results-run }}
+      PREPARED_AGAIN: ${{ inputs.prepared-again }}
       IGNORE_CHECKS: ${{ inputs.ignore-checks }}
       FLEET_LOGINS: ${{ inputs.fleet-logins }}
       ARMED_LABEL: ${{ inputs.armed-label }}
@@ -244,11 +261,21 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
+      # A release prepared again reads the results of the release run the old page named, as a review does: an artifact that has
+      # expired downloads nothing, and the record then writes HOLD and says why, so a failed download is a warning. The cut's
+      # artifact `prepared-again` of this run is read again here, for the record to check the head against and answer the request.
       - name: Get the results
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [[ "$PREPARED_AGAIN" == true ]]; then
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name prepared-again --dir "$RUNNER_TEMP/prepared-again"
+            if ! gh run download "$RESULTS_RUN" --repo "$GITHUB_REPOSITORY" --name results --dir "$RUNNER_TEMP/results"; then
+              echo "::warning title=Record::the artifact 'results' of run $RESULTS_RUN could not be downloaded: the record says why"
+            fi
+            exit 0
+          fi
           gh run download "$RESULTS_RUN" --repo "$GITHUB_REPOSITORY" --name results --dir "$RUNNER_TEMP/results"
           [[ -f "$RUNNER_TEMP/results/results.json" ]] || { echo "::error title=Record::the artifact 'results' of run $RESULTS_RUN holds no results.json"; exit 1; }
 
@@ -266,6 +293,7 @@ jobs:
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
           if [[ -n "$ASK_WORKFLOW" ]]; then args+=(--ask-workflow "$ASK_WORKFLOW"); fi
           if [[ -n "$GATE_WORKFLOW" ]]; then args+=(--gate-workflow "$GATE_WORKFLOW"); fi
+          if [[ "$PREPARED_AGAIN" == true ]]; then args+=(--prepared-again "$RUNNER_TEMP/prepared-again"); fi
           node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
 
@@ -349,7 +377,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           head=$(git -C caller rev-parse HEAD)
-          source=$(jq -r .build.source "$RUNNER_TEMP/results/results.json")
+          # A release prepared again whose old results could not be downloaded has no build to wait on: the record says HOLD.
+          if [[ "$PREPARED_AGAIN" == true && ! -f "$RUNNER_TEMP/results/results.json" ]]; then
+            source=$head
+          else
+            source=$(jq -r .build.source "$RUNNER_TEMP/results/results.json")
+          fi
           unfinished() {
             gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$1/check-runs?per_page=100" \
               | jq -r --arg run "$GITHUB_RUN_ID" --arg ignore "$IGNORE_CHECKS" '
@@ -597,6 +630,7 @@ jobs:
           if [[ -n "$FLEET_LOGINS" ]]; then args+=(--fleet-logins "$FLEET_LOGINS"); fi
           if [[ -n "$ASK_WORKFLOW" ]]; then args+=(--ask-workflow "$ASK_WORKFLOW"); fi
           if [[ -n "$GATE_WORKFLOW" ]]; then args+=(--gate-workflow "$GATE_WORKFLOW"); fi
+          if [[ "$PREPARED_AGAIN" == true ]]; then args+=(--prepared-again "$RUNNER_TEMP/prepared-again"); fi
           node shipyard/bin/shipyard record --from-candidate --draft-until-ship --release-run "$RESULTS_RUN" --update --results "$RUNNER_TEMP/results/results.json" --pr "$PR" \
             --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}" \
             | tee "$RUNNER_TEMP/record.log"
@@ -886,3 +920,148 @@ jobs:
             node shipyard/bin/shipyard record --from-evidence --update --pr "$PR" \
               --dir caller --out "$RUNNER_TEMP/record.md" --changelog "$CHANGELOG" --armed-label "$ARMED_LABEL" "${args[@]}"
           fi
+
+  # A release prepared again (`/prepare-again`): the router runs this workflow with `prepared-again: true` after a cut that added
+  # the new prep to an open release PR as one commit (cut.yml), in the same run. This job reads that cut's artifact
+  # `prepared-again`. A cut that prepared nothing again uploads none, and the job then does nothing. A refused cut (a new prep at
+  # another level) is answered on the PR with the cut's message, which names `/level`, and the job fails having written nothing
+  # else. An applied one is checked first: the PR is open and at the commit the cut made, that commit carries
+  # `Release-Prepared-Again` for the request, and the new body's release data is the one its `Release-Data` trailer pins. A check
+  # that fails writes nothing. Then the body becomes the cut's new body, naming the release run the old page named, and the
+  # record job above records the new head from that run's results, as it records any head, and answers the request. Nothing is
+  # built and staging does not run again. Its group is its own, so it never takes the place of a record waiting on a push.
+  prepared-again:
+    name: prepared-again
+    if: ${{ inputs.prepared-again && !inputs.review }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: shipyard-record-prepared-again-${{ github.repository }}-${{ inputs.pr }}
+      cancel-in-progress: false
+    permissions:
+      contents: read         # check out the candidate; this job neither commits nor changes the PR's draft state
+      pull-requests: write   # put the cut's new body on the PR, and answer the request on it
+      actions: read          # download this run's artifact `prepared-again`
+      id-token: write        # learn which commit of this workflow is running (job_workflow_sha)
+    outputs:
+      pr: ${{ steps.again.outputs.pr }}
+      run: ${{ steps.page.outputs.run }}
+    steps:
+      - name: Check the prepared-again inputs
+        shell: bash
+        env:
+          PR: ${{ inputs.pr }}
+        run: |
+          fail() { echo "::error title=Record::$1"; exit 2; }
+          [[ -z "$PR" || "$PR" =~ ^[1-9][0-9]*$ ]] || fail 'pr must be the release PR'"'"'s number, or empty for the cut'"'"'s'
+
+      # The PR the cut prepared again, from its artifact: the cut's outputs may not reach a caller when the cut failed (a refusal),
+      # so the router can give none. A `pr` it gives must be the artifact's.
+      - name: Get the prepared-again outcome
+        id: again
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+        run: |
+          fail() { echo "::error title=Record::$1"; exit 2; }
+          found=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=prepared-again&per_page=100" \
+            --jq '[.artifacts[] | select(.name == "prepared-again" and .expired != true)] | length') \
+            || fail "could not read the artifacts of run $GITHUB_RUN_ID"
+          [[ "$found" =~ ^[0-9]+$ ]] || fail "GitHub did not say which artifacts run $GITHUB_RUN_ID has"
+          if (( found == 0 )); then
+            echo "The cut of run $GITHUB_RUN_ID prepared no release PR again (it uploaded no prepared-again artifact): there is no page to put on a PR."
+            exit 0
+          fi
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name prepared-again --dir "$RUNNER_TEMP/prepared-again"
+          pr=$(jq -r '.pr // empty' "$RUNNER_TEMP/prepared-again/prepared-again.json") || fail 'prepared-again.json is not JSON'
+          [[ "$pr" =~ ^[1-9][0-9]*$ ]] || fail 'prepared-again.json names no PR'
+          if [[ -n "$PR" && "$PR" != "$pr" ]]; then fail "the cut prepared #$pr again, not #$PR, the PR this record was given"; fi
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Find this workflow's commit for the prepared-again page
+        id: self
+        shell: bash
+        run: |
+          node - <<'JS'
+          (async () => {
+            const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+            if (!url) throw new Error('no OIDC token: the caller must grant id-token: write');
+            const res = await fetch(`${url}&audience=shipyard`, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+              signal: AbortSignal.timeout(20000),
+            });
+            if (!res.ok) throw new Error(`OIDC token request answered ${res.status}`);
+            const { value } = await res.json();
+            const claims = JSON.parse(Buffer.from(value.split('.')[1], 'base64url').toString());
+            const ref = String(claims.job_workflow_ref);
+            if (!ref.startsWith('turbot/shipyard-workflows/.github/workflows/record.yml@')) {
+              throw new Error('this workflow must run as turbot/shipyard-workflows record.yml');
+            }
+            if (!/^[0-9a-f]{40}$/.test(claims.job_workflow_sha)) throw new Error('job_workflow_sha is not a commit');
+            require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, `sha=${claims.job_workflow_sha}\n`);
+          })().catch((e) => {
+            console.log(`::error title=Record::${e.message}`);
+            process.exit(2);
+          });
+          JS
+
+      - name: Check out shipyard at that commit for the prepared-again page
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: turbot/shipyard-workflows
+          ref: ${{ steps.self.outputs.sha }}
+          path: shipyard
+          persist-credentials: false
+
+      # The record job's own check of the branch, for the PR the artifact names. With none, no PR is read, and the checkout below
+      # is the caller's ref, which nothing reads.
+      - name: Find the release PR's branch for the prepared-again page
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.again.outputs.pr }}
+        run: |
+          if [[ -z "$PR" ]]; then echo 'No release PR was prepared again: no branch to find.'; exit 0; fi
+          pull=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '[.head.ref, .head.repo.full_name, .state] | @tsv')
+          IFS=$'\t' read -r branch head_repo state <<< "$pull"
+          if [[ ! "$branch" =~ ^release/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error title=Record::#$PR does not come from a release/X.Y.Z branch, so it is not a release PR"
+            exit 1
+          fi
+          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+          if [[ "$(lower "$head_repo")" != "$(lower "$GITHUB_REPOSITORY")" ]]; then
+            echo "::error title=Record::#$PR comes from another repo ($head_repo), not a candidate of this one"
+            exit 1
+          fi
+          if [[ "$state" != "open" ]]; then
+            echo "::error title=Record::#$PR is $state: a record is written for an open candidate"
+            exit 1
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      # The candidate as the PR has it now, with its history. No credentials stay in the checkout.
+      - name: Check out the candidate for the prepared-again page
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+          path: caller
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A refusal is answered on the PR and fails the job (exit 1); a check that fails writes nothing (exit 2). The release run the
+      # old page named is this job's output, for the record job.
+      - name: Put the new page on the PR
+        id: page
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR: ${{ steps.again.outputs.pr }}
+        run: |
+          if [[ -z "$PR" ]]; then echo 'No release PR was prepared again: nothing is written.'; exit 0; fi
+          node shipyard/bin/shipyard record --prepared-again "$RUNNER_TEMP/prepared-again" --pr "$PR" --dir caller --out "$RUNNER_TEMP/release-run"
+          run=$(cat "$RUNNER_TEMP/release-run")
+          [[ "$run" =~ ^[1-9][0-9]*$ ]] || { echo "::error title=Record::the release run the old page named is not a run id"; exit 2; }
+          echo "run=$run" >> "$GITHUB_OUTPUT"
