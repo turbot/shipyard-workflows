@@ -115,7 +115,7 @@
           "maxLength": 140
         },
         "items": {
-          "description": "Each item of the notes, the main point first. Its kind sets the label it shows under; the order of the file sets the order within one label, never the order of the labels.",
+          "description": "Each item of the notes, the main point first. Its kind sets the label it shows under; the order of the file sets the order within one label, never the order of the labels. A new cut whose every PR is grouped Internal may hold none (lint-prep checks it), unless the release check asks for notes.",
           "type": "array",
           "minItems": 1,
           "items": {
