@@ -30,9 +30,15 @@ on:
         type: string
         default: ''
       automation-logins:
-        description: 'The accounts that open release PRs, comma-separated. Required: a PR opened by any other account fails rule 1.'
+        description: 'The accounts that open release PRs, by login, comma-separated. With this and automation-ids empty, Shipyard trusts its own accounts (the fleet''s Apps and the Actions bot) by user ID. Given, only the accounts named here and in automation-ids are trusted, and a login one of Shipyard''s accounts has had means that account''s ID: turbot-agent-fleet[bot] trusts the fleet''s App, not github-actions[bot].'
         type: string
-        required: true
+        required: false
+        default: ''
+      automation-ids:
+        description: 'The accounts that open release PRs, by user ID (GitHub''s user.id), comma-separated. Given, only these and the accounts automation-logins names are trusted; with neither, Shipyard''s own accounts.'
+        type: string
+        required: false
+        default: ''
       fleet-logins:
         description: Accounts whose reviews never count, comma-separated, beside every bot account.
         type: string
@@ -121,14 +127,13 @@ jobs:
           APPROVERS: ${{ inputs.approvers }}
           PRODUCT: ${{ inputs.product }}
           AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          AUTOMATION_IDS: ${{ inputs.automation-ids }}
           FLEET_LOGINS: ${{ inputs.fleet-logins }}
           ARMED_LABEL: ${{ inputs.armed-label }}
         run: |
           args=(--dir caller --tag-prefix "$TAG_PREFIX" --changelog "$CHANGELOG_PATH" --armed-label "$ARMED_LABEL")
           [ -n "$APPROVERS" ] && args+=(--approvers "$APPROVERS")
           [ -n "$PRODUCT" ] && args+=(--product "$PRODUCT")
-          # Never empty: with no one named, any bot account that opens a release/ PR would pass rule 1.
-          if [ -z "${AUTOMATION_LOGINS//[[:space:],]/}" ]; then echo "::error::automation-logins names no account: name the accounts that open release PRs"; exit 1; fi
-          args+=(--automation-logins "$AUTOMATION_LOGINS")
+          args+=(--automation-logins "$AUTOMATION_LOGINS" --automation-ids "$AUTOMATION_IDS")
           [ -n "$FLEET_LOGINS" ] && args+=(--fleet-logins "$FLEET_LOGINS")
           node shipyard/bin/shipyard release-check "${args[@]}"

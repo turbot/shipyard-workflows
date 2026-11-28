@@ -16,9 +16,15 @@ on:
   workflow_call:
     inputs:
       automation-logins:
-        description: 'The accounts that open release PRs, comma-separated (the same as the tag job''s).'
+        description: 'The accounts that open release PRs, by login, comma-separated. With this and automation-ids empty, Shipyard trusts its own accounts (the fleet''s Apps and the Actions bot) by user ID. Given, only the accounts named here and in automation-ids are trusted, and a login one of Shipyard''s accounts has had means that account''s ID: turbot-agent-fleet[bot] trusts the fleet''s App, not github-actions[bot].'
         type: string
-        required: true
+        required: false
+        default: ''
+      automation-ids:
+        description: 'The accounts that open release PRs, by user ID (GitHub''s user.id), comma-separated. Given, only these and the accounts automation-logins names are trusted; with neither, Shipyard''s own accounts.'
+        type: string
+        required: false
+        default: ''
       tag-prefix:
         description: The prefix of the repo's release tags.
         type: string
@@ -144,7 +150,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
           AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
-        run: node shipyard/bin/shipyard release-version --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS"
+          AUTOMATION_IDS: ${{ inputs.automation-ids }}
+        run: node shipyard/bin/shipyard release-version --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --automation-ids "$AUTOMATION_IDS"
 
       - name: Name the tap
         id: tap

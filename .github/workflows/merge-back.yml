@@ -25,9 +25,15 @@ on:
         type: string
         default: v
       automation-logins:
-        description: 'The accounts that open release PRs, comma-separated. Required: a merged release/ PR from any other account is never merged back.'
+        description: 'The accounts that open release PRs, by login, comma-separated. With this and automation-ids empty, Shipyard trusts its own accounts (the fleet''s Apps and the Actions bot) by user ID. Given, only the accounts named here and in automation-ids are trusted, and a login one of Shipyard''s accounts has had means that account''s ID: turbot-agent-fleet[bot] trusts the fleet''s App, not github-actions[bot].'
         type: string
-        required: true
+        required: false
+        default: ''
+      automation-ids:
+        description: 'The accounts that open release PRs, by user ID (GitHub''s user.id), comma-separated. Given, only these and the accounts automation-logins names are trusted; with neither, Shipyard''s own accounts.'
+        type: string
+        required: false
+        default: ''
       wait-for-tag-minutes:
         description: 'A whole number of minutes, at most 60: how long to wait for the release tag to appear at the merge commit before refusing, for a repo whose tag is made by its own workflow in the same push. 0 (the default) does not wait: the tag job this one needs has made it.'
         type: string
@@ -64,7 +70,6 @@ jobs:
         env:
           CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
           HAS_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
-          AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
           WAIT_FOR_TAG: ${{ inputs.wait-for-tag-minutes }}
         run: |
           missing=()
@@ -76,7 +81,6 @@ jobs:
             echo "::error title=Merge back::the release key is read only on main or main-<x.y>, and this run is on another ref. Nothing was merged back"
             exit 1
           fi
-          [ -n "${AUTOMATION_LOGINS//[[:space:],]/}" ] || { echo "::error title=Merge back::automation-logins names no account: name the accounts that open release PRs"; exit 1; }
           if ! [[ "$WAIT_FOR_TAG" =~ ^[0-9]{1,2}$ ]] || [ "$WAIT_FOR_TAG" -gt 60 ]; then
             shown="${WAIT_FOR_TAG//[^[:graph:] ]/?}"; shown="${shown:0:20}"
             echo "::error title=Merge back::wait-for-tag-minutes \"$shown\" is not a whole number of minutes, at most 60. Nothing was merged back"
@@ -143,5 +147,6 @@ jobs:
           RELEASE_TOKEN: ${{ steps.app.outputs.token }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
           AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          AUTOMATION_IDS: ${{ inputs.automation-ids }}
           WAIT_FOR_TAG: ${{ inputs.wait-for-tag-minutes }}
-        run: node shipyard/bin/shipyard merge-back --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --wait-for-tag-minutes "$WAIT_FOR_TAG"
+        run: node shipyard/bin/shipyard merge-back --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --automation-ids "$AUTOMATION_IDS" --wait-for-tag-minutes "$WAIT_FOR_TAG"

@@ -3,7 +3,6 @@
   "workflows": {
     "announce.yml": {
       "inputs": [
-        "automation-logins",
         "tag"
       ],
       "secrets": [],
@@ -41,7 +40,6 @@
     },
     "changelog-page.yml": {
       "inputs": [
-        "automation-logins",
         "page-targets"
       ],
       "secrets": [],
@@ -144,9 +142,7 @@
       }
     },
     "go-cli-ship.yml": {
-      "inputs": [
-        "automation-logins"
-      ],
+      "inputs": [],
       "secrets": [],
       "jobs": {
         "ship": {
@@ -173,7 +169,6 @@
     },
     "homebrew.yml": {
       "inputs": [
-        "automation-logins",
         "desc",
         "formula",
         "homepage",
@@ -189,9 +184,7 @@
       }
     },
     "merge-back.yml": {
-      "inputs": [
-        "automation-logins"
-      ],
+      "inputs": [],
       "secrets": [],
       "jobs": {
         "merge-back": {
@@ -326,9 +319,7 @@
       }
     },
     "release-check.yml": {
-      "inputs": [
-        "automation-logins"
-      ],
+      "inputs": [],
       "secrets": [],
       "jobs": {
         "release-check": {
@@ -372,9 +363,7 @@
       }
     },
     "release-version.yml": {
-      "inputs": [
-        "automation-logins"
-      ],
+      "inputs": [],
       "secrets": [],
       "jobs": {
         "release": {
@@ -557,9 +546,7 @@
       }
     },
     "tag.yml": {
-      "inputs": [
-        "automation-logins"
-      ],
+      "inputs": [],
       "secrets": [],
       "jobs": {
         "shipped": {

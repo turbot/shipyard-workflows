@@ -79,10 +79,14 @@
 # none. The secrets come by name, never `secrets: inherit`, and a secret a repo lacks arrives empty; each job passes on only the
 # one its workflow reads. Each job that enters an environment (the ask, `slack`; the gate, the tag, the merge-back and a
 # prerelease, `release`) carries an allow-list `if:`: a `push` or a `workflow_dispatch` on the branch the environment allows,
-# started (and, if run again, run again) by the record's own token (`github-actions[bot]`), the fleet (`turbot-agent-fleet[bot]`)
-# or a person, never another bot. Only an account with write access can dispatch a workflow or run one again, so a person here
-# has write, and a push to the branch is a merge or a push of an account with write access. No job enters an environment on a
-# review or a PR. The announcement posts to Slack with the org's token and carries the same actors and branch check.
+# started by the record's own token (`github-actions[bot]`), the fleet's Apps or a person, never another bot. The bots are named
+# by user ID (`github.actor_id`; `ACTOR_IDS` in lib/openers.js holds the IDs), so a renamed App needs no change here and an
+# account that takes an old login is not trusted. A run that is run again is run again by the account that started it or by a
+# person: GitHub gives no ID of the account that runs it again, so a bot is trusted to do so only when it is the starting account
+# itself. A run a person started that a bot runs again skips these jobs: a person must run it again. Only an account with write
+# access can dispatch a workflow or run one again, so a person here has write, and a push to the branch is a merge or a push of
+# an account with write access. No job enters an environment on a review or a PR. The announcement posts to
+# Slack with the org's token and carries the same actors and branch check.
 #
 # Nothing of the repo's is run in the first job: its workflow files and `.github/shipyard.yml` are read with git, as data. The
 # event's values reach the command as environment variables, never in a shell line.
@@ -124,7 +128,6 @@ jobs:
       commit: ${{ steps.route.outputs.commit }}
       prep: ${{ steps.route.outputs.prep }}
       approvers: ${{ steps.route.outputs.approvers }}
-      automation-logins: ${{ steps.route.outputs.automation-logins }}
       candidate: ${{ steps.route.outputs.candidate }}
       binary: ${{ steps.route.outputs.binary }}
       make-target: ${{ steps.route.outputs.make-target }}
@@ -368,7 +371,6 @@ jobs:
     uses: ./.github/workflows/release-check.yml
     with:
       approvers: ${{ needs.route.outputs.approvers }}
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
     secrets:
       org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
 
@@ -392,7 +394,6 @@ jobs:
       pr: ${{ needs.route.outputs.pr }}
       comment: ${{ needs.route.outputs.comment }}
       approvers: ${{ needs.route.outputs.approvers }}
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
       prepare-again-note: ${{ needs.route.outputs.prepare-again-note }}
     secrets:
       org-token: ${{ secrets.SHIPYARD_ORG_TOKEN }}
@@ -482,8 +483,8 @@ jobs:
       contains(fromJSON(needs.route.outputs.flows), 'ask')
       && github.event_name == 'workflow_dispatch'
       && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
     permissions:
       contents: read
       pull-requests: write   # the one note on the release PR that keeps the ask from posting twice
@@ -503,8 +504,8 @@ jobs:
       contains(fromJSON(needs.route.outputs.flows), 'gate')
       && github.event_name == 'workflow_dispatch'
       && github.ref == 'refs/heads/main'
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
     permissions:
       contents: read
       pull-requests: read
@@ -543,7 +544,6 @@ jobs:
       id-token: write
     uses: ./.github/workflows/go-cli-ship.yml
     with:
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
       make-target: ${{ needs.route.outputs.make-target }}
       build-image: ${{ needs.route.outputs.build-image }}
       runner: ${{ needs.route.outputs.runner }}
@@ -562,8 +562,8 @@ jobs:
       && contains(fromJSON(needs.route.outputs.flows), 'tag')
       && github.event_name == 'push'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
       && (needs.route.outputs.tag-signal == 'merge'
       || (needs.route.outputs.tag-signal == 'ship-job' && needs.ship.result == 'success'))
     permissions:
@@ -575,7 +575,6 @@ jobs:
     with:
       signal: ${{ needs.route.outputs.tag-signal }}
       ship-result: ${{ needs.route.outputs.tag-signal == 'ship-job' && needs.ship.result || '' }}
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
       floating-major: ${{ needs.route.outputs.floating-major == 'true' }}
       merge-back: false
       product: ${{ needs.route.outputs.product }}
@@ -595,8 +594,8 @@ jobs:
       && contains(fromJSON(needs.route.outputs.flows), 'merge-back')
       && github.event_name == 'push'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
       && (needs.tag.result == 'success' || !contains(fromJSON(needs.route.outputs.flows), 'tag'))
     permissions:
       contents: read
@@ -604,7 +603,6 @@ jobs:
       id-token: write
     uses: ./.github/workflows/merge-back.yml
     with:
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
       wait-for-tag-minutes: ${{ !contains(fromJSON(needs.route.outputs.flows), 'tag') && '45' || '0' }}
     secrets:
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -623,8 +621,8 @@ jobs:
       && needs.route.outputs.homebrew-tap != ''
       && github.event_name == 'push'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
       && needs.tag.result == 'success'
       && needs.tag.outputs.tag != ''
     permissions:
@@ -633,7 +631,6 @@ jobs:
       id-token: write
     uses: ./.github/workflows/homebrew.yml
     with:
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
       tap: ${{ needs.route.outputs.homebrew-tap }}
       formula: ${{ needs.route.outputs.homebrew-formula }}
       binary: ${{ needs.route.outputs.homebrew-binary }}
@@ -658,8 +655,8 @@ jobs:
       && needs.route.outputs.page-targets != ''
       && github.event_name == 'push'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
       && needs.tag.result == 'success'
       && needs.tag.outputs.tag != ''
     permissions:
@@ -668,7 +665,6 @@ jobs:
       id-token: write
     uses: ./.github/workflows/changelog-page.yml
     with:
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
       page-targets: ${{ needs.route.outputs.page-targets }}
     secrets:
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -684,8 +680,8 @@ jobs:
       contains(fromJSON(needs.route.outputs.flows), 'shipped')
       && github.event_name == 'workflow_dispatch'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
     permissions:
       contents: read
       pull-requests: read
@@ -693,7 +689,6 @@ jobs:
       id-token: write
     uses: ./.github/workflows/tag.yml
     with:
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
       floating-major: ${{ needs.route.outputs.floating-major == 'true' }}
       product: ${{ needs.route.outputs.product }}
       assets: ${{ needs.route.outputs.assets }}
@@ -715,8 +710,8 @@ jobs:
     if: >-
       !cancelled()
       && needs.route.result == 'success'
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
       && ((contains(fromJSON(needs.route.outputs.flows), 'announce')
       && ((github.event_name == 'push'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
@@ -736,7 +731,6 @@ jobs:
     uses: ./.github/workflows/announce.yml
     with:
       tag: ${{ needs.tag.outputs.tag || needs.merge-back.outputs.tag || needs.shipped.outputs.tag || needs.route.outputs.announce-tag }}
-      automation-logins: ${{ needs.route.outputs.automation-logins }}
     secrets:
       slack-token: ${{ secrets.SHIPYARD_SLACK_BOT_TOKEN }}
 
@@ -815,8 +809,8 @@ jobs:
       contains(fromJSON(needs.route.outputs.flows), 'prerelease')
       && github.event_name == 'workflow_dispatch'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
     permissions:
       actions: read         # not used by this step: the workflow's publish job asks for it, and GitHub checks that job here too
       contents: read
@@ -850,8 +844,8 @@ jobs:
       && needs.route.outputs.pre-build != ''
       && github.event_name == 'workflow_dispatch'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
     permissions:
       actions: write        # start the build on the work branch and read its run
       contents: read
@@ -880,8 +874,8 @@ jobs:
       && needs.route.outputs.pre-build == 'go-cli'
       && github.event_name == 'workflow_dispatch'
       && !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
     permissions:
       contents: read
     uses: ./.github/workflows/go-cli-prerelease-build.yml
@@ -908,8 +902,8 @@ jobs:
       && contains(fromJSON(needs.route.outputs.flows), 'prerelease')
       && github.event_name == 'workflow_dispatch'
       && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/main-'))
-      && (github.actor == 'github-actions[bot]' || github.actor == 'turbot-agent-fleet[bot]' || !endsWith(github.actor, '[bot]'))
-      && (github.triggering_actor == 'github-actions[bot]' || github.triggering_actor == 'turbot-agent-fleet[bot]' || !endsWith(github.triggering_actor, '[bot]'))
+      && (github.actor_id == '340042353' || github.actor_id == '340045443' || github.actor_id == '41898282' || !endsWith(github.actor, '[bot]'))
+      && (github.triggering_actor == github.actor || !endsWith(github.triggering_actor, '[bot]'))
     permissions:
       actions: read         # the build run and its files, which another run of this repo made
       contents: read

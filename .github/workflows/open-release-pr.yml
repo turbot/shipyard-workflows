@@ -9,7 +9,7 @@
 # `v<major>` (`v0`), the tag each release moves to its own commit.
 #
 # The caller runs it as a job after the cut (`needs: cut`), in the same workflow. The PR's author is then `github-actions[bot]`,
-# which the tag job's `automation-logins` must name. Nothing here checks out the caller's repo or runs its code.
+# which Shipyard trusts by its user ID (41898282) with no `automation-logins`. Nothing here checks out the caller's repo or runs its code.
 
 name: Open the release PR
 

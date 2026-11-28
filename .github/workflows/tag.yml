@@ -56,9 +56,15 @@ on:
         type: string
         default: v
       automation-logins:
-        description: 'The accounts that open release PRs, comma-separated. Required: a merged release/ PR from any other account is never tagged.'
+        description: 'The accounts that open release PRs, by login, comma-separated. With this and automation-ids empty, Shipyard trusts its own accounts (the fleet''s Apps and the Actions bot) by user ID. Given, only the accounts named here and in automation-ids are trusted, and a login one of Shipyard''s accounts has had means that account''s ID: turbot-agent-fleet[bot] trusts the fleet''s App, not github-actions[bot].'
         type: string
-        required: true
+        required: false
+        default: ''
+      automation-ids:
+        description: 'The accounts that open release PRs, by user ID (GitHub''s user.id), comma-separated. Given, only these and the accounts automation-logins names are trusted; with neither, Shipyard''s own accounts.'
+        type: string
+        required: false
+        default: ''
       floating-major:
         description: Move the repo's floating major tag (v0, v1) to each release that is the newest of its major.
         type: boolean
@@ -154,9 +160,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
           AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          AUTOMATION_IDS: ${{ inputs.automation-ids }}
         run: |
-          if [ -z "${AUTOMATION_LOGINS//[[:space:],]/}" ]; then echo "::error::automation-logins names no account: name the accounts that open release PRs"; exit 1; fi
-          node shipyard/bin/shipyard tag --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS"
+          node shipyard/bin/shipyard tag --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --automation-ids "$AUTOMATION_IDS"
 
   # A push to main or main-*, or the run a `/shipped` started there: the job that holds the release key.
   tag:
@@ -302,6 +308,7 @@ jobs:
           SHIP_RESULT: ${{ inputs.ship-result }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
           AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
+          AUTOMATION_IDS: ${{ inputs.automation-ids }}
           FLOATING_MAJOR: ${{ inputs.floating-major }}
           PRODUCT: ${{ inputs.product }}
           CHANGELOG: ${{ inputs.changelog }}
@@ -310,9 +317,7 @@ jobs:
           ASSETS_DIR: ${{ runner.temp }}/release-assets
           DOWNLOAD: ${{ inputs.assets-run-id == '' && steps.download.outcome || steps.download-run.outcome }}
         run: |
-          # Never empty: with no one named, a release/ PR from any account that merged could be tagged.
-          if [ -z "${AUTOMATION_LOGINS//[[:space:],]/}" ]; then echo "::error::automation-logins names no account: name the accounts that open release PRs"; exit 1; fi
-          args=(--signal "$SIGNAL" --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS")
+          args=(--signal "$SIGNAL" --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --automation-ids "$AUTOMATION_IDS")
           [ -n "$CHANGELOG" ] && args+=("--changelog=$CHANGELOG")
           [ -n "$PRODUCT" ] && args+=("--product=$PRODUCT")
           [ -n "$SHIP_RESULT" ] && args+=(--ship-result "$SHIP_RESULT")
@@ -332,4 +337,5 @@ jobs:
           RELEASE_TOKEN: ${{ steps.app.outputs.token }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
           AUTOMATION_LOGINS: ${{ inputs.automation-logins }}
-        run: node shipyard/bin/shipyard merge-back --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS"
+          AUTOMATION_IDS: ${{ inputs.automation-ids }}
+        run: node shipyard/bin/shipyard merge-back --tag-prefix "$TAG_PREFIX" --automation-logins "$AUTOMATION_LOGINS" --automation-ids "$AUTOMATION_IDS"
